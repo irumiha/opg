@@ -4,6 +4,14 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
 
 ---
 
+## 0. Fundamental Directive: Strict Prompt Adherence
+
+- **Never do what was not specifically asked for**: Follow the user's instructions literally and precisely.
+- **No Unsolicited Transformations or Conversions**: Never modify file formats, restructure data, or perform unsolicited conversions unless explicitly instructed by the user.
+- **Minimal, Focused Execution**: Confine actions strictly to what is requested.
+
+---
+
 ## 1. Core Architectural Principles
 
 1. **Native Wire Protocol & Dynamic TLS Loading via `core:dynlib` (No `libpq`)**:

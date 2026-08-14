@@ -6,9 +6,10 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
 
 ## 1. Core Architectural Principles
 
-1. **Zero C-Bindings / Pure Odin**:
-   - Strictly **no** `libpq`, OpenSSL C bindings, or external C dependencies.
-   - All network I/O, cryptographic handshakes (SCRAM-SHA-256, MD5), and wire protocol serialization must be written in pure Odin.
+1. **Native Wire Protocol & mbedtls for TLS (No `libpq`)**:
+   - Strictly **no** `libpq`. The PostgreSQL Frontend/Backend Protocol 3.0 is implemented natively from scratch over TCP.
+   - Wire protocol serialization (`pgproto`), connection pooling (`pgconn`), and data mapping (`pgorm`) are written in Odin.
+   - For Transport Layer Security (TLS/SSL encryption), the driver utilizes **mbedtls** (via Odin bindings) for TLS session negotiation and encrypted socket streaming, keeping TLS complexity isolated and manageable.
 
 2. **3-Layer Separation of Concerns**:
    - `pgproto/`: Pure data-transformation layer. Encodes and decodes PostgreSQL wire messages (`[]byte` $\leftrightarrow$ Odin structs). Agnostic to sockets, files, or network I/O.

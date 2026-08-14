@@ -9,11 +9,13 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
 1. **Native Wire Protocol & Dynamic TLS Loading via `core:dynlib` (No `libpq`)**:
    - Strictly **no** `libpq`. The PostgreSQL Frontend/Backend Protocol 3.0 is implemented natively from scratch over TCP.
    - Wire protocol serialization (`pgproto`), connection pooling (`pgconn`), and data mapping (`pgorm`) are written natively in Odin.
-   - **TLS Strategy (Dynamic Runtime Probing)**:
+   - **TLS Strategy (Dynamic Runtime Probing via `core:dynlib`)**:
      - The driver does not statically link external TLS libraries.
-     - If TLS is required, the driver utilizes Odin's `core:dynlib` to probe for the presence of **OpenSSL** (`libssl` / `libcrypto`) and dynamically loads symbol hooks if available.
-     - If loading OpenSSL fails, it falls back to probing and loading **mbedTLS** (`libmbedtls` / `libmbedcrypto`).
-     - If both probes fail, TLS encrypted connections become unavailable (returning an explicit `Net_Error` / `Auth_Error`), while standard unencrypted TCP connections continue to operate normally. (Note: TLS implementation is deferred to later milestones).
+     - When a TLS connection is requested, the driver dynamically probes for platform-native or installed cryptographic libraries at runtime:
+       - **Windows**: Probes and loads the native Windows **Schannel** API (`secur32.dll` / `sspicli.dll`), falling back to OpenSSL or mbedTLS if present.
+       - **macOS (Darwin)**: Probes and loads native **SecureTransport** / Security Framework (`Security.framework`), falling back to OpenSSL or mbedTLS.
+       - **Linux & POSIX**: Probes for **OpenSSL** (`libssl` / `libcrypto`), falling back to **mbedTLS** (`libmbedtls` / `libmbedcrypto`).
+     - If all relevant probes fail on the target system, TLS encrypted connections become unavailable (returning an explicit `Net_Error` / `Auth_Error`), while standard unencrypted TCP connections continue to operate normally. *(Note: TLS implementation is deferred to later milestones)*.
 
 2. **3-Layer Separation of Concerns**:
    - `pgproto/`: Pure data-transformation layer. Encodes and decodes PostgreSQL wire messages (`[]byte` $\leftrightarrow$ Odin structs). Agnostic to sockets, files, or network I/O.

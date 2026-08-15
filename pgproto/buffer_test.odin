@@ -370,4 +370,186 @@ test_reader_writer_extended :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_buffer_edge_cases :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// 1. Empty buffer tests
+	empty := []byte{}
+	offset := 0
+	_, ok_u8 := read_u8(empty, &offset)
+	testing.expect(t, !ok_u8, "empty read_u8 should fail")
+	testing.expect_value(t, offset, 0)
+
+	_, ok_str := read_string_nt(empty, &offset)
+	testing.expect(t, !ok_str, "empty read_string_nt should fail")
+	testing.expect_value(t, offset, 0)
+
+	_, ok_str_cl := read_string_nt_clone(empty, &offset, context.temp_allocator)
+	testing.expect(t, !ok_str_cl, "empty read_string_nt_clone should fail")
+	testing.expect_value(t, offset, 0)
+
+	// 2. Null-only string
+	only_null := []byte{0x00}
+	offset = 0
+	str, ok_null := read_string_nt(only_null, &offset)
+	testing.expect(t, ok_null, "null-only string should succeed")
+	testing.expect_value(t, str, "")
+	testing.expect_value(t, offset, 1)
+
+	offset = 0
+	str_cl, ok_null_cl := read_string_nt_clone(only_null, &offset, context.temp_allocator)
+	testing.expect(t, ok_null_cl, "null-only string clone should succeed")
+	testing.expect_value(t, str_cl, "")
+	testing.expect_value(t, offset, 1)
+
+	// 3. Negative count in read_bytes_counted
+	neg_bytes := []byte{1, 2, 3}
+	offset = 0
+	_, ok_neg := read_bytes_counted(neg_bytes, &offset, -5)
+	testing.expect(t, !ok_neg, "negative count should fail")
+	testing.expect_value(t, offset, 0)
+
+	// 4. Zero count in read_bytes_counted
+	zero_bytes, ok_zero := read_bytes_counted(neg_bytes, &offset, 0)
+	testing.expect(t, ok_zero, "zero count should succeed")
+	testing.expect_value(t, len(zero_bytes), 0)
+	testing.expect_value(t, offset, 0)
+
+	// 5. Negative initial offset
+	neg_offset := -1
+	_, ok_neg_off := read_u8(neg_bytes, &neg_offset)
+	testing.expect(t, !ok_neg_off, "negative offset should fail")
+	testing.expect_value(t, neg_offset, -1)
+
+	neg_offset = -1
+	_, ok_neg_off_str := read_string_nt(neg_bytes, &neg_offset)
+	testing.expect(t, !ok_neg_off_str, "negative offset string should fail")
+	testing.expect_value(t, neg_offset, -1)
+
+	// 6. Reader struct bounds and edge cases
+	r: Reader
+	reader_init(&r, empty)
+	testing.expect_value(t, reader_remaining(&r), 0)
+	testing.expect(t, !reader_has_bytes(&r, 1), "empty reader has no bytes")
+	testing.expect(t, reader_has_bytes(&r, 0), "empty reader has 0 bytes")
+	testing.expect(t, !reader_has_bytes(&r, -1), "negative count has_bytes returns false")
+
+	_, ok_r_u8 := reader_read_u8(&r)
+	testing.expect(t, !ok_r_u8, "empty reader_read_u8 should fail")
+	_, ok_r_i16 := reader_read_i16(&r)
+	testing.expect(t, !ok_r_i16, "empty reader_read_i16 should fail")
+	_, ok_r_u16 := reader_read_u16(&r)
+	testing.expect(t, !ok_r_u16, "empty reader_read_u16 should fail")
+	_, ok_r_i32 := reader_read_i32(&r)
+	testing.expect(t, !ok_r_i32, "empty reader_read_i32 should fail")
+	_, ok_r_u32 := reader_read_u32(&r)
+	testing.expect(t, !ok_r_u32, "empty reader_read_u32 should fail")
+	_, ok_r_i64 := reader_read_i64(&r)
+	testing.expect(t, !ok_r_i64, "empty reader_read_i64 should fail")
+	_, ok_r_bytes := reader_read_bytes(&r, 1)
+	testing.expect(t, !ok_r_bytes, "empty reader_read_bytes should fail")
+	_, ok_r_str := reader_read_string_nt(&r)
+	testing.expect(t, !ok_r_str, "empty reader_read_string_nt should fail")
+	_, ok_r_str_cl := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, !ok_r_str_cl, "empty reader_read_string_nt_clone should fail")
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_boundary_integers_roundtrip :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	w: Writer
+	writer_init(&w, &buf)
+
+	// Write minimum and maximum boundary values for each integer type
+	writer_write_u8(&w, 0)
+	writer_write_u8(&w, 255)
+
+	writer_write_i16(&w, min(i16))
+	writer_write_i16(&w, max(i16))
+
+	writer_write_u16(&w, min(u16))
+	writer_write_u16(&w, max(u16))
+
+	writer_write_i32(&w, min(i32))
+	writer_write_i32(&w, max(i32))
+
+	writer_write_u32(&w, min(u32))
+	writer_write_u32(&w, max(u32))
+
+	writer_write_i64(&w, min(i64))
+	writer_write_i64(&w, max(i64))
+
+	r: Reader
+	reader_init(&r, buf[:])
+
+	v_u8_min, ok_u8_min := reader_read_u8(&r)
+	testing.expect(t, ok_u8_min, "read min u8")
+	testing.expect_value(t, v_u8_min, u8(0))
+
+	v_u8_max, ok_u8_max := reader_read_u8(&r)
+	testing.expect(t, ok_u8_max, "read max u8")
+	testing.expect_value(t, v_u8_max, u8(255))
+
+	v_i16_min, ok_i16_min := reader_read_i16(&r)
+	testing.expect(t, ok_i16_min, "read min i16")
+	testing.expect_value(t, v_i16_min, min(i16))
+
+	v_i16_max, ok_i16_max := reader_read_i16(&r)
+	testing.expect(t, ok_i16_max, "read max i16")
+	testing.expect_value(t, v_i16_max, max(i16))
+
+	v_u16_min, ok_u16_min := reader_read_u16(&r)
+	testing.expect(t, ok_u16_min, "read min u16")
+	testing.expect_value(t, v_u16_min, min(u16))
+
+	v_u16_max, ok_u16_max := reader_read_u16(&r)
+	testing.expect(t, ok_u16_max, "read max u16")
+	testing.expect_value(t, v_u16_max, max(u16))
+
+	v_i32_min, ok_i32_min := reader_read_i32(&r)
+	testing.expect(t, ok_i32_min, "read min i32")
+	testing.expect_value(t, v_i32_min, min(i32))
+
+	v_i32_max, ok_i32_max := reader_read_i32(&r)
+	testing.expect(t, ok_i32_max, "read max i32")
+	testing.expect_value(t, v_i32_max, max(i32))
+
+	v_u32_min, ok_u32_min := reader_read_u32(&r)
+	testing.expect(t, ok_u32_min, "read min u32")
+	testing.expect_value(t, v_u32_min, min(u32))
+
+	v_u32_max, ok_u32_max := reader_read_u32(&r)
+	testing.expect(t, ok_u32_max, "read max u32")
+	testing.expect_value(t, v_u32_max, max(u32))
+
+	v_i64_min, ok_i64_min := reader_read_i64(&r)
+	testing.expect(t, ok_i64_min, "read min i64")
+	testing.expect_value(t, v_i64_min, min(i64))
+
+	v_i64_max, ok_i64_max := reader_read_i64(&r)
+	testing.expect(t, ok_i64_max, "read max i64")
+	testing.expect_value(t, v_i64_max, max(i64))
+
+	testing.expect_value(t, reader_remaining(&r), 0)
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+
 

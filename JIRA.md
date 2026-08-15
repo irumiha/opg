@@ -44,7 +44,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-101] Wire Buffer Reader / Writer & Big-Endian Codec Primitives
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgproto`
 - **Files**:
   - `pgproto/buffer.odin`

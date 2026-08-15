@@ -1,7 +1,6 @@
 package pgproto
 
 import "core:encoding/endian"
-import "core:mem"
 import ".." // Imports root package for opg.Error types
 
 // ----------------------------------------------------------------------------

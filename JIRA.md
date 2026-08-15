@@ -181,7 +181,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-202] SCRAM-SHA-256 & MD5 Authentication Handshake Engine
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgconn`
 - **Files**:
   - `pgconn/auth.odin`

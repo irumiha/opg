@@ -1,9 +1,11 @@
 package pgconn
 
+import "core:encoding/base64"
 import "core:mem"
 import "core:strings"
 import "core:testing"
 import "../pgerr"
+import "../pgproto"
 
 @(test)
 test_auth_md5_password_computation :: proc(t: ^testing.T) {
@@ -296,5 +298,287 @@ test_auth_scram_verify_server_final_rfc7677 :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_auth_handle_challenge_cleartext :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
 
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
 
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		auth_msg := pgproto.Msg_Authentication{auth_type = .Cleartext_Password}
+		is_complete, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+		testing.expect(t, err == nil, "expected cleartext auth success")
+		testing.expect_value(t, is_complete, false)
+
+		// Check password message was sent: 'p' + 4-byte length + "secret\0"
+		testing.expect_value(t, mock.written_bytes[0], 'p')
+		testing.expect_value(t, len(mock.written_bytes), 1 + 4 + len("secret") + 1)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_auth_handle_challenge_md5 :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		auth_msg := pgproto.Msg_Authentication{
+			auth_type = .MD5_Password,
+			salt = [4]byte{1, 2, 3, 4},
+		}
+		is_complete, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+		testing.expect(t, err == nil, "expected md5 auth success")
+		testing.expect_value(t, is_complete, false)
+
+		testing.expect_value(t, mock.written_bytes[0], 'p')
+		testing.expect_value(t, len(mock.written_bytes), 1 + 4 + 35 + 1)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_auth_handle_challenge_ok :: proc(t: ^testing.T) {
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+	defer mock_transport_destroy(&mock)
+
+	transport := make_mock_transport(&mock)
+	stream: Stream_Buffer
+	stream_init(&stream, transport)
+	defer stream_destroy(&stream)
+
+	auth_msg := pgproto.Msg_Authentication{auth_type = .Ok}
+	is_complete, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+	testing.expect(t, err == nil, "expected auth ok")
+	testing.expect_value(t, is_complete, true)
+	testing.expect_value(t, len(mock.written_bytes), 0)
+}
+
+@(test)
+test_auth_handle_challenge_sasl_full_conversation :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		state: Scram_State
+		defer {
+			delete(state.client_nonce, context.allocator)
+			delete(state.client_first_bare, context.allocator)
+			delete(state.combined_nonce, context.allocator)
+			delete(state.server_first, context.allocator)
+			delete(state.auth_message, context.allocator)
+			delete(state.salt, context.allocator)
+		}
+
+		// 1. Server offers SASL mechanisms
+		auth_sasl := pgproto.Msg_Authentication{
+			auth_type = .SASL,
+			mechanisms = []string{"SCRAM-SHA-256"},
+		}
+		done1, err1 := auth_handle_challenge(&stream, auth_sasl, "user", "pencil", &state, context.allocator)
+		testing.expect(t, err1 == nil, "expected sasl init success")
+		testing.expect_value(t, done1, false)
+		testing.expect(t, len(mock.written_bytes) > 0)
+		testing.expect_value(t, mock.written_bytes[0], 'p')
+
+		// 2. Server sends SASL_Continue
+		server_first := strings.concatenate(
+			{"r=", state.client_nonce, "%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"},
+			context.temp_allocator,
+		)
+		auth_continue := pgproto.Msg_Authentication{
+			auth_type = .SASL_Continue,
+			sasl_data = server_first,
+		}
+		done2, err2 := auth_handle_challenge(&stream, auth_continue, "user", "pencil", &state, context.allocator)
+		testing.expect(t, err2 == nil, "expected sasl continue success")
+		testing.expect_value(t, done2, false)
+
+		// 3. Server sends SASL_Final with valid server signature
+		b64_sig := base64.encode(state.server_signature[:], allocator = context.temp_allocator)
+		server_final := strings.concatenate({"v=", b64_sig}, context.temp_allocator)
+		auth_final := pgproto.Msg_Authentication{
+			auth_type = .SASL_Final,
+			sasl_data = server_final,
+		}
+		done3, err3 := auth_handle_challenge(&stream, auth_final, "user", "pencil", &state, context.allocator)
+		testing.expect(t, err3 == nil, "expected sasl final success")
+		testing.expect_value(t, done3, false)
+
+		// 4. Server sends AuthenticationOk
+		auth_ok := pgproto.Msg_Authentication{
+			auth_type = .Ok,
+		}
+		done4, err4 := auth_handle_challenge(&stream, auth_ok, "user", "pencil", &state, context.allocator)
+		testing.expect(t, err4 == nil, "expected ok success")
+		testing.expect_value(t, done4, true)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_auth_handle_challenge_sasl_errors :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		// Case 1: Server offers SASL without SCRAM-SHA-256
+		{
+			auth_msg := pgproto.Msg_Authentication{
+				auth_type = .SASL,
+				mechanisms = []string{"GSSAPI", "PLAIN"},
+			}
+			_, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+			testing.expect(t, err != nil, "expected error when SCRAM-SHA-256 not offered")
+			#partial switch aerr in err {
+			case pgerr.Auth_Error:
+				testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.Unsupported_Auth_Mechanism)
+			case:
+				testing.expect(t, false, "expected Auth_Error")
+			}
+		}
+
+		// Case 2: scram_state is nil for SASL
+		{
+			auth_msg := pgproto.Msg_Authentication{
+				auth_type = .SASL,
+				mechanisms = []string{"SCRAM-SHA-256"},
+			}
+			_, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+			testing.expect(t, err != nil, "expected error when scram_state is nil")
+			#partial switch aerr in err {
+			case pgerr.Auth_Error:
+				testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.Authentication_Failed)
+			case:
+				testing.expect(t, false, "expected Auth_Error")
+			}
+		}
+
+		// Case 3: scram_state is nil for SASL_Continue
+		{
+			auth_msg := pgproto.Msg_Authentication{
+				auth_type = .SASL_Continue,
+				sasl_data = "r=dummy,s=c2FsdA==,i=4096",
+			}
+			_, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+			testing.expect(t, err != nil, "expected error when scram_state is nil on continue")
+			#partial switch aerr in err {
+			case pgerr.Auth_Error:
+				testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.Authentication_Failed)
+			case:
+				testing.expect(t, false, "expected Auth_Error")
+			}
+		}
+
+		// Case 4: scram_state is nil for SASL_Final
+		{
+			auth_msg := pgproto.Msg_Authentication{
+				auth_type = .SASL_Final,
+				sasl_data = "v=AAAA",
+			}
+			_, err := auth_handle_challenge(&stream, auth_msg, "postgres", "secret", nil)
+			testing.expect(t, err != nil, "expected error when scram_state is nil on final")
+			#partial switch aerr in err {
+			case pgerr.Auth_Error:
+				testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.Authentication_Failed)
+			case:
+				testing.expect(t, false, "expected Auth_Error")
+			}
+		}
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_auth_handle_challenge_unsupported_and_unrecognized :: proc(t: ^testing.T) {
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+	defer mock_transport_destroy(&mock)
+
+	transport := make_mock_transport(&mock)
+	stream: Stream_Buffer
+	stream_init(&stream, transport)
+	defer stream_destroy(&stream)
+
+	// Unsupported auth types: Kerberos_V5, SCM_Credential, GSS, GSS_Continue, SSPI
+	unsupported := []pgproto.Auth_Type{
+		.Kerberos_V5,
+		.SCM_Credential,
+		.GSS,
+		.GSS_Continue,
+		.SSPI,
+	}
+
+	for ut in unsupported {
+		auth_msg := pgproto.Msg_Authentication{auth_type = ut}
+		_, err := auth_handle_challenge(&stream, auth_msg, "user", "pass", nil)
+		testing.expect(t, err != nil, "expected error for unsupported auth type")
+		#partial switch aerr in err {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.Unsupported_Auth_Mechanism)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
+	}
+
+	// Unrecognized auth type
+	{
+		auth_msg := pgproto.Msg_Authentication{auth_type = pgproto.Auth_Type(999)}
+		_, err := auth_handle_challenge(&stream, auth_msg, "user", "pass", nil)
+		testing.expect(t, err != nil, "expected error for unrecognized auth type")
+		#partial switch aerr in err {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.Authentication_Failed)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
+	}
+}

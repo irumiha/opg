@@ -1,9 +1,11 @@
 package pgconn
 
+import "core:encoding/endian"
 import "core:mem"
 import "core:net"
 import "core:time"
 import "../pgerr"
+import "../pgproto"
 
 // Stream_Transport provides polymorphic I/O over TCP sockets or dynamic TLS streams.
 Stream_Transport :: struct {
@@ -156,4 +158,83 @@ stream_compact :: proc(s: ^Stream_Buffer) {
 	s.read_offset = 0
 	s.write_offset = unread
 }
+
+stream_read_message :: proc(
+	s: ^Stream_Buffer,
+	temp_allocator := context.temp_allocator,
+) -> (
+	msg: pgproto.Backend_Message,
+	err: pgerr.Error,
+) {
+	for {
+		// 1. Check if we have at least 5 bytes for packet header (1 byte type + 4 bytes length)
+		unread := s.write_offset - s.read_offset
+		if unread >= 5 {
+			len_bytes := s.buf[s.read_offset + 1 : s.read_offset + 5]
+			payload_len, ok := endian.get_i32(len_bytes, .Big)
+			if !ok || payload_len < 4 {
+				return nil, pgerr.Protocol_Error{
+					type = .Invalid_Length,
+					message = "Invalid message length header",
+					byte_offset = s.read_offset + 1,
+				}
+			}
+
+			total_packet_len := 1 + int(payload_len)
+
+			// 2. If entire packet is in buffer, parse and return
+			if unread >= total_packet_len {
+				packet_slice := s.buf[s.read_offset : s.read_offset + total_packet_len]
+				parsed_msg, _, parse_err := pgproto.parse_message(packet_slice, temp_allocator)
+				if parse_err != nil {
+					return nil, parse_err
+				}
+
+				s.read_offset += total_packet_len
+
+				// Check compaction threshold
+				if s.read_offset >= s.compact_threshold {
+					stream_compact(s)
+				}
+
+				return parsed_msg, nil
+			}
+
+			// Need more bytes: ensure buffer has enough capacity for total_packet_len
+			required_capacity := s.read_offset + total_packet_len
+			if required_capacity > len(s.buf) {
+				// If compacting would make room, compact first
+				if s.read_offset > 0 {
+					stream_compact(s)
+				}
+				required_capacity = s.write_offset + (total_packet_len - (s.write_offset - s.read_offset))
+				if required_capacity > len(s.buf) {
+					resize(&s.buf, max(len(s.buf) * 2, required_capacity))
+				}
+			}
+		} else {
+			// Ensure buffer has space to read more bytes
+			if s.write_offset >= len(s.buf) {
+				if s.read_offset > 0 {
+					stream_compact(s)
+				}
+				if s.write_offset >= len(s.buf) {
+					resize(&s.buf, len(s.buf) * 2)
+				}
+			}
+		}
+
+		// 3. Read available bytes from transport
+		dest := s.buf[s.write_offset:]
+		n, rerr := s.transport.read(s.transport.data, dest)
+		if rerr != nil {
+			return nil, rerr
+		}
+		if n == 0 {
+			return nil, pgerr.Net_Error{type = .Socket_Closed}
+		}
+		s.write_offset += n
+	}
+}
+
 

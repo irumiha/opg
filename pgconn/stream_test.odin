@@ -5,6 +5,7 @@ import "core:net"
 import "core:testing"
 import "core:time"
 import "../pgerr"
+import "../pgproto"
 
 // Mock_Transport simulates network socket chunk delivery and capture for testing
 Mock_Transport :: struct {
@@ -377,4 +378,292 @@ test_stream_buffer_lifecycle_and_compaction :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+@(test)
+test_stream_read_single_message :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Build ReadyForQuery message: 'Z', length 5, 'I' (Idle) -> [ 'Z', 0, 0, 0, 5, 'I' ]
+		rfq_bytes := []byte{'Z', 0, 0, 0, 5, 'I'}
+		append(&mock.read_chunks, rfq_bytes)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		msg, err := stream_read_message(&stream)
+		testing.expect(t, err == nil, "expected successful message parse")
+
+		rfq, ok := msg.(pgproto.Msg_Ready_For_Query)
+		testing.expect(t, ok, "expected ReadyForQuery message type")
+		testing.expect_value(t, rfq.status, pgproto.Transaction_Status.Idle)
+		testing.expect_value(t, stream_unread_bytes(&stream), 0)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_fragmented_message :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Split 6-byte message across 3 chunks: [ 'Z', 0 ], [ 0, 0 ], [ 5, 'I' ]
+		append(&mock.read_chunks, []byte{'Z', 0})
+		append(&mock.read_chunks, []byte{0, 0})
+		append(&mock.read_chunks, []byte{5, 'I'})
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		msg, err := stream_read_message(&stream)
+		testing.expect(t, err == nil, "expected successful fragmented message parse")
+
+		rfq, ok := msg.(pgproto.Msg_Ready_For_Query)
+		testing.expect(t, ok, "expected ReadyForQuery message type")
+		testing.expect_value(t, rfq.status, pgproto.Transaction_Status.Idle)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_multiple_messages_in_single_chunk :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Combine ReadyForQuery ('Z') and ParseComplete ('1') in one chunk
+		combined := []byte{
+			'Z', 0, 0, 0, 5, 'I',
+			'1', 0, 0, 0, 4,
+		}
+		append(&mock.read_chunks, combined)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		// Read msg 1
+		msg1, err1 := stream_read_message(&stream)
+		testing.expect(t, err1 == nil, "expected msg1 success")
+		_, ok1 := msg1.(pgproto.Msg_Ready_For_Query)
+		testing.expect(t, ok1, "expected ReadyForQuery")
+
+		// Read msg 2
+		msg2, err2 := stream_read_message(&stream)
+		testing.expect(t, err2 == nil, "expected msg2 success")
+		_, ok2 := msg2.(pgproto.Msg_Parse_Complete)
+		testing.expect(t, ok2, "expected ParseComplete")
+
+		testing.expect_value(t, stream_unread_bytes(&stream), 0)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_invalid_length :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Invalid length header: length = 2 (< 4)
+		invalid_bytes := []byte{'Z', 0, 0, 0, 2}
+		append(&mock.read_chunks, invalid_bytes)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		testing.expect(t, err != nil, "expected error for invalid length header")
+		proto_err, ok := err.(pgerr.Protocol_Error)
+		testing.expect(t, ok, "expected Protocol_Error")
+		testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Invalid_Length)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_transport_error_and_closed :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// Test transport timeout error
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+		mock.simulate_timeout = true
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		testing.expect(t, err != nil, "expected error on timeout")
+		net_err, ok := err.(pgerr.Net_Error)
+		testing.expect(t, ok, "expected Net_Error")
+		testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Timeout)
+	}
+
+	// Test EOF / Socket closed when reading header
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+		mock.simulate_eof = true
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		testing.expect(t, err != nil, "expected error on eof")
+		net_err, ok := err.(pgerr.Net_Error)
+		testing.expect(t, ok, "expected Net_Error")
+		testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+	}
+
+	// Test EOF / Socket closed mid-packet
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+		// Only header arrives, then EOF
+		append(&mock.read_chunks, []byte{'Z', 0, 0, 0, 5})
+		mock.simulate_eof = false
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		// First read gets 5 bytes, then next read sees EOF because no more chunks
+		_, err := stream_read_message(&stream)
+		testing.expect(t, err != nil, "expected error on truncated packet eof")
+		net_err, ok := err.(pgerr.Net_Error)
+		testing.expect(t, ok, "expected Net_Error")
+		testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_large_message_buffer_growth_and_compaction :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Message with total length 15: CommandComplete ('C'), payload len 14
+		cc_tag := "SELECT 42\x00"
+		cc_bytes := make([]byte, 1 + 4 + len(cc_tag))
+		defer delete(cc_bytes)
+		cc_bytes[0] = 'C'
+		cc_len := u32(4 + len(cc_tag))
+		cc_bytes[1] = byte(cc_len >> 24)
+		cc_bytes[2] = byte(cc_len >> 16)
+		cc_bytes[3] = byte(cc_len >> 8)
+		cc_bytes[4] = byte(cc_len)
+		copy(cc_bytes[5:], cc_tag)
+
+		// Fragment into tiny chunks of 3 bytes each
+		chunk_size :: 3
+		for i := 0; i < len(cc_bytes); i += chunk_size {
+			end := min(i + chunk_size, len(cc_bytes))
+			append(&mock.read_chunks, cc_bytes[i:end])
+		}
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		// Initialize with tiny capacity 8 and low compaction threshold 4 to force growth & compaction
+		stream_init(&stream, transport, initial_capacity = 8, compact_threshold = 4)
+		defer stream_destroy(&stream)
+
+		msg, err := stream_read_message(&stream)
+		testing.expect(t, err == nil, "expected successful message parse after buffer growth")
+		cc, ok := msg.(pgproto.Msg_Command_Complete)
+		testing.expect(t, ok, "expected Msg_Command_Complete")
+		testing.expect_value(t, cc.tag, "SELECT 42")
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_parse_error :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Unknown backend message type '?'
+		bad_bytes := []byte{'?', 0, 0, 0, 4}
+		append(&mock.read_chunks, bad_bytes)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		testing.expect(t, err != nil, "expected error on unknown message type")
+		proto_err, ok := err.(pgerr.Protocol_Error)
+		testing.expect(t, ok, "expected Protocol_Error")
+		testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Unknown_Message_Type)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 

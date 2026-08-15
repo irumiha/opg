@@ -99,6 +99,43 @@ parameter_status_destroy :: proc(msg: Msg_Parameter_Status, allocator := context
 	delete(msg.value, allocator)
 }
 
+/*
+	row_description_clone deep-copies a Msg_Row_Description. Parsed messages
+	borrow field-name strings from the network read buffer, which is compacted
+	and reused by subsequent reads; any RowDescription retained beyond the next
+	socket read (e.g. by a row collector that maps after the execution loop)
+	must be cloned first.
+*/
+row_description_clone :: proc(
+	msg: Msg_Row_Description,
+	allocator := context.allocator,
+) -> (
+	res: Msg_Row_Description,
+	err: mem.Allocator_Error,
+) {
+	defer if err != nil {
+		row_description_destroy(res, allocator)
+		res = {}
+	}
+	res.fields = make([]Field_Description, len(msg.fields), allocator) or_return
+	for f, i in msg.fields {
+		res.fields[i] = f
+		res.fields[i].name = strings.clone(f.name, allocator) or_return
+	}
+	return res, nil
+}
+
+/*
+	row_description_destroy frees strings and the field slice previously cloned
+	with row_description_clone.
+*/
+row_description_destroy :: proc(msg: Msg_Row_Description, allocator := context.allocator) {
+	for f in msg.fields {
+		delete(f.name, allocator)
+	}
+	delete(msg.fields, allocator)
+}
+
 Transaction_Status :: enum u8 {
 	Idle               = 'I', // Not in a transaction block
 	In_Transaction     = 'T', // In a transaction block

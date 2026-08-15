@@ -47,6 +47,13 @@ map_row_to_struct :: proc(
 /*
 	map_rows_to_slice maps an array of PostgreSQL DataRows into a slice of Odin structs.
 	Allocates the returned slice and all nested strings using `allocator` (defaults to `context.temp_allocator`).
+
+	NOTE ON PARTIAL FAILURE: if mapping fails mid-slice the returned error is
+	propagated and the partially filled result slice is freed, but the strings
+	and slices already decoded into earlier rows cannot be freed generically.
+	With the default temp allocator this is harmless; callers passing a
+	persistent allocator should treat a mapping error as leaking the earlier
+	rows' inner allocations (or reset their arena).
 */
 map_rows_to_slice :: proc(
 	$T: typeid,
@@ -114,8 +121,15 @@ map_fields_to_struct :: proc(
 		col_val := row.values[col_idx]
 		col_format := desc.fields[col_idx].format_code
 
-		// 3. Decode into target field
-		decode_value_into_target(field_ptr, field.type, col_val, col_format, allocator)
+		// 3. Decode into target field. A matched column that cannot be decoded
+		// into the target type is a hard error; silent zeroing would corrupt
+		// results without any diagnostic.
+		if !decode_value_into_target(field_ptr, field.type, col_val, col_format, allocator) {
+			return pgerr.Protocol_Error{
+				type    = .Column_Decode_Failed,
+				message = "Failed to decode column value into struct field",
+			}
+		}
 	}
 
 	return nil
@@ -164,12 +178,6 @@ decode_value_into_target :: proc(
 
 	#partial switch variant in ti.variant {
 	case reflect.Type_Info_Named:
-		if ti.id == typeid_of(time.Time) {
-			if col_val.is_null do return true
-			ts, ok := decode_text_timestamp(col_val.data)
-			if ok do (^time.Time)(dst)^ = ts
-			return ok
-		}
 		return decode_value_into_target(dst, variant.base, col_val, format, allocator)
 
 	case reflect.Type_Info_Union:
@@ -243,8 +251,11 @@ decode_value_into_target :: proc(
 			switch ti.size {
 			case 1:
 				v, ok := decode_text_i16(col_val.data)
-				if ok do (^i8)(dst)^ = i8(v)
-				return ok
+				if !ok do return false
+				// Bit range covers both i8 and u8 targets.
+				if v < -128 || v > 255 do return false
+				(^i8)(dst)^ = i8(v)
+				return true
 			case 2:
 				v, ok := decode_text_i16(col_val.data)
 				if ok do (^i16)(dst)^ = v
@@ -301,6 +312,7 @@ decode_value_into_target :: proc(
 		}
 
 	case reflect.Type_Info_Array:
+		if col_val.is_null do return true
 		if variant.count == 16 && variant.elem.id == typeid_of(u8) {
 			if format == .Binary {
 				u, ok := decode_binary_uuid(col_val.data)
@@ -329,10 +341,64 @@ decode_value_into_target :: proc(
 		}
 		#partial switch el in elem_base.variant {
 		case reflect.Type_Info_Integer:
-			arr, ok := decode_text_array_i32(col_val.data, allocator)
-			if ok do (^[]i32)(dst)^ = arr
+			// PostgreSQL array values arrive in text format on this path.
+			if format == .Binary do return false
+			switch el.signed {
+			case true:
+				switch elem_base.size {
+				case 2:
+					arr, ok := decode_text_array_i16(col_val.data, allocator)
+					if ok do (^[]i16)(dst)^ = arr
+					return ok
+				case 4:
+					arr, ok := decode_text_array_i32(col_val.data, allocator)
+					if ok do (^[]i32)(dst)^ = arr
+					return ok
+				case 8:
+					arr, ok := decode_text_array_i64(col_val.data, allocator)
+					if ok do (^[]i64)(dst)^ = arr
+					return ok
+				}
+			case false:
+				// Unsigned targets: PostgreSQL has no unsigned integer types, so
+				// values always fit the same-width signed decode; the bit pattern
+				// is reinterpreted through the unsigned slice type.
+				switch elem_base.size {
+				case 2:
+					arr, ok := decode_text_array_i16(col_val.data, allocator)
+					if ok do (^[]u16)(dst)^ = transmute([]u16)arr
+					return ok
+				case 4:
+					arr, ok := decode_text_array_i32(col_val.data, allocator)
+					if ok do (^[]u32)(dst)^ = transmute([]u32)arr
+					return ok
+				case 8:
+					arr, ok := decode_text_array_i64(col_val.data, allocator)
+					if ok do (^[]u64)(dst)^ = transmute([]u64)arr
+					return ok
+				}
+			}
+			return false
+		case reflect.Type_Info_Float:
+			if format == .Binary do return false
+			switch elem_base.size {
+			case 4:
+				arr, ok := decode_text_array_f32(col_val.data, allocator)
+				if ok do (^[]f32)(dst)^ = arr
+				return ok
+			case 8:
+				arr, ok := decode_text_array_f64(col_val.data, allocator)
+				if ok do (^[]f64)(dst)^ = arr
+				return ok
+			}
+			return false
+		case reflect.Type_Info_Boolean:
+			if format == .Binary do return false
+			arr, ok := decode_text_array_bool(col_val.data, allocator)
+			if ok do (^[]bool)(dst)^ = arr
 			return ok
 		case reflect.Type_Info_String:
+			if format == .Binary do return false
 			arr, ok := decode_text_array_string(col_val.data, allocator)
 			if ok do (^[]string)(dst)^ = arr
 			return ok

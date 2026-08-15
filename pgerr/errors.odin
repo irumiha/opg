@@ -39,8 +39,10 @@ Protocol_Error_Type :: enum {
 	Unexpected_Message,
 	Buffer_Underflow,
 	Invalid_Column_Count,
+	Column_Decode_Failed,
 	Unsupported_Format_Code,
 	Unsupported_Protocol_Version,
+	Unsupported_Parameter_Type,
 	No_Data,
 }
 

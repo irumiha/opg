@@ -3,6 +3,11 @@ package pgorm
 // ----------------------------------------------------------------------------
 // PostgreSQL Data Type OIDs
 // ----------------------------------------------------------------------------
+// Reference table of standard PostgreSQL type OIDs. The current pgorm mapper
+// decodes by the *target Odin type*, not by OID, so these constants are not
+// consulted at runtime yet; they are reserved for the OID-driven codec paths
+// (NUMERIC, JSON/JSONB, binary arrays) planned for the public facade epic.
+// ----------------------------------------------------------------------------
 
 Oid :: distinct u32
 

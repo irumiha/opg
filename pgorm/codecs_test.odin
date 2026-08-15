@@ -1,6 +1,8 @@
 package pgorm
 
+import "core:fmt"
 import "core:mem"
+import "core:strconv"
 import "core:testing"
 import "core:time"
 
@@ -153,6 +155,58 @@ test_decode_text_date_and_timestamp :: proc(t: ^testing.T) {
 	testing.expect_value(t, tsec, 30)
 }
 
+// Regression (code review H3): fractional seconds were discarded and
+// timezone offsets ignored, silently truncating/corrupting time values.
+@(test)
+test_decode_text_timestamp_fraction_and_offset :: proc(t: ^testing.T) {
+	base, base_ok := time.datetime_to_time(2024, 3, 15, 13, 45, 30, 0)
+	testing.expect(t, base_ok)
+
+	// Fractional seconds.
+	ts_us, ok_us := decode_text_timestamp(tb("2024-03-15 13:45:30.123456"))
+	testing.expect(t, ok_us)
+	testing.expect_value(t, time.to_unix_nanoseconds(ts_us), time.to_unix_nanoseconds(base) + 123_456_000)
+
+	ts_tenth, ok_tenth := decode_text_timestamp(tb("2024-03-15 13:45:30.5"))
+	testing.expect(t, ok_tenth)
+	testing.expect_value(t, time.to_unix_nanoseconds(ts_tenth), time.to_unix_nanoseconds(base) + 500_000_000)
+
+	ts_ns, ok_ns := decode_text_timestamp(tb("2024-03-15 13:45:30.123456789"))
+	testing.expect(t, ok_ns)
+	testing.expect_value(t, time.to_unix_nanoseconds(ts_ns), time.to_unix_nanoseconds(base) + 123_456_789)
+
+	// Timezone offsets shift the wall clock to the UTC instant.
+	ts_plus2, ok_plus2 := decode_text_timestamp(tb("2024-03-15 13:45:30+02"))
+	testing.expect(t, ok_plus2)
+	testing.expect_value(t, time.to_unix_nanoseconds(ts_plus2), time.to_unix_nanoseconds(base) - 2 * 3600 * 1_000_000_000)
+
+	ts_530, ok_530 := decode_text_timestamp(tb("2024-03-15 13:45:30.25+05:30"))
+	testing.expect(t, ok_530)
+	testing.expect_value(
+		t,
+		time.to_unix_nanoseconds(ts_530),
+		time.to_unix_nanoseconds(base) + 250_000_000 - (5 * 3600 + 30 * 60) * 1_000_000_000,
+	)
+
+	ts_neg, ok_neg := decode_text_timestamp(tb("2024-03-15 13:45:30-03:15"))
+	testing.expect(t, ok_neg)
+	testing.expect_value(t, time.to_unix_nanoseconds(ts_neg), time.to_unix_nanoseconds(base) + (3 * 3600 + 15 * 60) * 1_000_000_000)
+
+	ts_z, ok_z := decode_text_timestamp(tb("2024-03-15 13:45:30Z"))
+	testing.expect(t, ok_z)
+	testing.expect_value(t, time.to_unix_nanoseconds(ts_z), time.to_unix_nanoseconds(base))
+
+	// Malformed fractions and unsupported infinities must fail.
+	for bad in ([]string{"2024-03-15 13:45:30.", "2024-03-15 13:45:30.12x", "2024-03-15 13:45:30.1234567890", "infinity", "-infinity"}) {
+		_, bad_ok := decode_text_timestamp(transmute([]byte)bad)
+		testing.expect(t, !bad_ok, "invalid timestamp must fail")
+	}
+
+	// Invalid calendar dates are rejected by datetime_to_time.
+	_, bad_date_ok := decode_text_timestamp(tb("2024-02-31 10:00:00"))
+	testing.expect(t, !bad_date_ok)
+}
+
 @(test)
 test_decode_text_arrays :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
@@ -181,6 +235,144 @@ test_decode_text_arrays :: proc(t: ^testing.T) {
 		delete(s, tracked)
 	}
 	delete(arr_str, tracked)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_decode_text_array_typed_variants :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	// i16
+	arr_i16, ok_i16 := decode_text_array_i16(tb("{300,-400}"), tracked)
+	testing.expect(t, ok_i16)
+	testing.expect_value(t, len(arr_i16), 2)
+	if len(arr_i16) == 2 {
+		testing.expect_value(t, arr_i16[0], i16(300))
+		testing.expect_value(t, arr_i16[1], i16(-400))
+	}
+	delete(arr_i16, tracked)
+
+	// i64 (values beyond i32 range)
+	arr_i64, ok_i64 := decode_text_array_i64(tb("{9000000000,-9000000001,3}"), tracked)
+	testing.expect(t, ok_i64)
+	testing.expect_value(t, len(arr_i64), 3)
+	if len(arr_i64) == 3 {
+		testing.expect_value(t, arr_i64[0], i64(9000000000))
+		testing.expect_value(t, arr_i64[1], i64(-9000000001))
+		testing.expect_value(t, arr_i64[2], i64(3))
+	}
+	delete(arr_i64, tracked)
+
+	// f32 / f64
+	arr_f32, ok_f32 := decode_text_array_f32(tb("{1.5,-2.25}"), tracked)
+	testing.expect(t, ok_f32)
+	testing.expect_value(t, len(arr_f32), 2)
+	if len(arr_f32) == 2 {
+		testing.expect_value(t, arr_f32[0], f32(1.5))
+		testing.expect_value(t, arr_f32[1], f32(-2.25))
+	}
+	delete(arr_f32, tracked)
+
+	arr_f64, ok_f64 := decode_text_array_f64(tb("{0.125,123456.789}"), tracked)
+	testing.expect(t, ok_f64)
+	testing.expect_value(t, len(arr_f64), 2)
+	if len(arr_f64) == 2 {
+		testing.expect_value(t, arr_f64[0], 0.125)
+		testing.expect_value(t, arr_f64[1], 123456.789)
+	}
+	delete(arr_f64, tracked)
+
+	// bool
+	arr_bool, ok_bool := decode_text_array_bool(tb("{t,f,true}"), tracked)
+	testing.expect(t, ok_bool)
+	testing.expect_value(t, len(arr_bool), 3)
+	if len(arr_bool) == 3 {
+		testing.expect_value(t, arr_bool[0], true)
+		testing.expect_value(t, arr_bool[1], false)
+		testing.expect_value(t, arr_bool[2], true)
+	}
+	delete(arr_bool, tracked)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_decode_text_array_empty :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	a_i32, ok_i32 := decode_text_array_i32(tb("{}"), tracked)
+	testing.expect(t, ok_i32)
+	testing.expect_value(t, len(a_i32), 0)
+	delete(a_i32, tracked)
+
+	a_str, ok_str := decode_text_array_string(tb("{}"), tracked)
+	testing.expect(t, ok_str)
+	testing.expect_value(t, len(a_str), 0)
+	delete(a_str, tracked)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_decode_text_array_null_element_fails :: proc(t: ^testing.T) {
+	// NULL elements cannot be represented in []i32 / []string; the decode
+	// must fail explicitly rather than truncate or misparse.
+	_, ok_i32 := decode_text_array_i32(tb("{1,NULL,3}"))
+	testing.expect(t, !ok_i32)
+
+	_, ok_str := decode_text_array_string(tb("{\"a\",NULL}"))
+	testing.expect(t, !ok_str)
+}
+
+@(test)
+test_decode_text_array_range_and_malformed :: proc(t: ^testing.T) {
+	// i32 overflow of a single element
+	_, ok_ovf := decode_text_array_i32(tb("{3000000000}"))
+	testing.expect(t, !ok_ovf, "i32 range overflow must fail")
+
+	// i16 overflow
+	_, ok_ovf16 := decode_text_array_i16(tb("{40000}"))
+	testing.expect(t, !ok_ovf16)
+
+	// Malformed shapes
+	for bad, bad_idx in ([]string{"{1,2", "1,2}", "{1,,2}", "{1,2,}", "", "{", "}"}) {
+		_, ok := decode_text_array_i32(transmute([]byte)bad)
+		if ok {
+			fmt.eprintf("  malformed case %d: %q\n", bad_idx, bad)
+		}
+		testing.expect(t, !ok, "malformed array must fail")
+	}
+
+	// Unterminated quoted element
+	_, ok_q := decode_text_array_string(tb("{\"unterminated}"))
+	testing.expect(t, !ok_q)
+}
+
+@(test)
+test_decode_text_array_string_escapes :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	// Quoted elements with escaped quote/backslash, plus an empty quoted element.
+	arr, ok := decode_text_array_string(tb("{\"say \\\"hi\\\"\",\"b\\\\c\",\"\"}"), tracked)
+	testing.expect(t, ok)
+	testing.expect_value(t, len(arr), 3)
+	testing.expect_value(t, arr[0], "say \"hi\"")
+	testing.expect_value(t, arr[1], "b\\c")
+	testing.expect_value(t, arr[2], "")
+	for s in arr {
+		delete(s, tracked)
+	}
+	delete(arr, tracked)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -294,7 +486,6 @@ test_encode_text_types :: proc(t: ^testing.T) {
 	f_bytes := encode_text_f64(3.1415, tracked)
 	testing.expect(t, len(f_bytes) > 0)
 	delete(f_bytes, tracked)
-
 	// UUID
 	raw_uuid := [16]u8{
 		0xa0, 0xee, 0xbc, 0x99, 0x9c, 0x0b, 0x4e, 0xf8,
@@ -352,4 +543,161 @@ test_encode_binary_types :: proc(t: ^testing.T) {
 	delete(f64_b, tracked)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+// Regression (code review H1): encode_text_f64 used "%f", which truncates to
+// 6 decimal places and corrupted float8 bind parameters. The encoding must
+// round-trip to the exact f64 value.
+@(test)
+test_encode_text_f64_round_trip :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	values := [?]f64{0.123456789012345, 19.99, -2.5e-10, 1e300, 0.1, -123456789.123456789}
+	for v in values {
+		encoded := encode_text_f64(v, tracked)
+		parsed, ok := strconv.parse_f64(string(encoded))
+		testing.expect(t, ok)
+		testing.expect_value(t, parsed, v)
+		delete(encoded, tracked)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+// Regression (code review H2): bytea bind parameters were sent as raw bytes
+// under text parameter format, which the server rejects or misdecodes. They
+// must be encoded as `\x` hex text.
+@(test)
+test_encode_text_bytea_hex :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	enc := encode_text_bytea([]byte{0xDE, 0xAD, 0x00, 0xBE, 0xEF}, tracked)
+	testing.expect_value(t, string(enc), "\\xdead00beef")
+	delete(enc, tracked)
+
+	empty := encode_text_bytea(nil, tracked)
+	testing.expect_value(t, string(empty), "\\x")
+	delete(empty, tracked)
+
+	// Encoded form must decode back to the original bytes.
+	round, ok := decode_text_bytea(transmute([]byte)string("\\xdead00beef"), tracked)
+	testing.expect(t, ok)
+	testing.expect_value(t, len(round), 5)
+	if len(round) == 5 {
+		testing.expect_value(t, round[0], u8(0xDE))
+		testing.expect_value(t, round[2], u8(0x00))
+		testing.expect_value(t, round[4], u8(0xEF))
+	}
+	delete(round, tracked)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+// ----------------------------------------------------------------------------
+// Coverage-Gap Tests (code review L8)
+// ----------------------------------------------------------------------------
+
+@(test)
+test_decode_text_bytea_escape_format :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	// Non-hex input falls back to the escape/plain path and clones as-is.
+	raw := tb("plain bytes")
+	val, ok := decode_text_bytea(raw, tracked)
+	testing.expect(t, ok)
+	testing.expect_value(t, string(val), "plain bytes")
+	delete(val, tracked)
+
+	// Odd-length hex payload must fail.
+	_, odd_ok := decode_text_bytea(tb("\\xabc"))
+	testing.expect(t, !odd_ok)
+
+	// Non-hex character inside hex payload must fail.
+	_, bad_ok := decode_text_bytea(tb("\\xzz"))
+	testing.expect(t, !bad_ok)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_decode_binary_date_and_timestamp :: proc(t: ^testing.T) {
+	// Binary date: days since 2000-01-01 (JD epoch offset 10957 unix days).
+	// 2000-01-01 -> pg_days = 0.
+	zero_days := encode_binary_i32(0)
+	d, d_ok := decode_binary_date(zero_days)
+	testing.expect(t, d_ok)
+	dy, dm, dd := time.date(d)
+	testing.expect_value(t, dy, 2000)
+	testing.expect_value(t, int(dm), 1)
+	testing.expect_value(t, dd, 1)
+
+	// 2000-01-02 -> pg_days = 1.
+	one_day := encode_binary_i32(1)
+	d1, d1_ok := decode_binary_date(one_day)
+	testing.expect(t, d1_ok)
+	d1y, d1m, d1d := time.date(d1)
+	testing.expect_value(t, d1y, 2000)
+	testing.expect_value(t, int(d1m), 1)
+	testing.expect_value(t, d1d, 2)
+
+	// Wrong length fails.
+	_, short_ok := decode_binary_date([]byte{0, 0, 0})
+	testing.expect(t, !short_ok)
+
+	// infinity sentinels fail.
+	pos_inf := encode_binary_i32(max(i32))
+	_, inf_ok := decode_binary_date(pos_inf)
+	testing.expect(t, !inf_ok)
+
+	// Binary timestamp: microseconds since 2000-01-01 00:00:00.
+	zero_micros := encode_binary_i64(0)
+	ts, ts_ok := decode_binary_timestamp(zero_micros)
+	testing.expect(t, ts_ok)
+	tsy, tsm, tsd := time.date(ts)
+	testing.expect_value(t, tsy, 2000)
+	testing.expect_value(t, int(tsm), 1)
+	testing.expect_value(t, tsd, 1)
+
+	// One full day of microseconds.
+	day_micros := encode_binary_i64(86_400_000_000)
+	ts1, ts1_ok := decode_binary_timestamp(day_micros)
+	testing.expect(t, ts1_ok)
+	ts1y, ts1m, ts1d := time.date(ts1)
+	testing.expect_value(t, ts1y, 2000)
+	testing.expect_value(t, int(ts1m), 1)
+	testing.expect_value(t, ts1d, 2)
+
+	// Wrong length fails.
+	_, ts_short_ok := decode_binary_timestamp([]byte{0, 0, 0, 0})
+	testing.expect(t, !ts_short_ok)
+}
+
+@(test)
+test_decode_text_uuid_strict_layout :: proc(t: ^testing.T) {
+	// Wrong length fails.
+	_, len_ok := decode_text_uuid(tb("a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a1"))
+	testing.expect(t, !len_ok)
+
+	// Dash in the wrong position fails even with 32 hex digits present.
+	_, dash_ok := decode_text_uuid(tb("a0eebc999-c0b-4ef8-bb6d-6bb9bd380a11"))
+	testing.expect(t, !dash_ok)
+
+	// Non-hex character fails.
+	_, hex_ok := decode_text_uuid(tb("z0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"))
+	testing.expect(t, !hex_ok)
+
+	// Uppercase hex is accepted.
+	upper, upper_ok := decode_text_uuid(tb("A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"))
+	testing.expect(t, upper_ok)
+	testing.expect_value(t, upper[0], u8(0xa0))
+	testing.expect_value(t, upper[15], u8(0x11))
 }

@@ -974,3 +974,45 @@ test_parameter_status_clone_and_destroy :: proc(t: ^testing.T) {
 	parameter_status_destroy(cloned, tracked)
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+@(test)
+test_row_description_clone_and_destroy :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	src := Msg_Row_Description{
+		fields = []Field_Description{
+			{name = "id", type_oid = 23, format_code = .Text},
+			{name = "name", type_oid = 25, format_code = .Binary},
+		},
+	}
+	cloned, err := row_description_clone(src, tracked)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(cloned.fields), 2)
+	testing.expect_value(t, cloned.fields[0].name, "id")
+	testing.expect_value(t, cloned.fields[1].name, "name")
+	testing.expect_value(t, cloned.fields[1].format_code, Field_Format.Binary)
+	testing.expect(t, raw_data(cloned.fields[0].name) != raw_data(src.fields[0].name), "name must be a copy")
+	testing.expect(t, raw_data(cloned.fields[1].name) != raw_data(src.fields[1].name), "name must be a copy")
+
+	row_description_destroy(cloned, tracked)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_row_description_clone_empty :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	src := Msg_Row_Description{fields = nil}
+	cloned, err := row_description_clone(src, tracked)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(cloned.fields), 0)
+
+	row_description_destroy(cloned, tracked)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

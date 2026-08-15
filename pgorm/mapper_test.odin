@@ -116,6 +116,54 @@ test_map_row_to_struct_null_and_missing_columns :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_map_row_to_struct_decode_failure :: proc(t: ^testing.T) {
+	desc := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{
+			{name = "id"},
+		},
+	}
+
+	// Non-numeric text into an integer field must fail loudly.
+	row_bad_int := pgproto.Msg_Data_Row{
+		values = []pgproto.Column_Value{text_col("not-a-number")},
+	}
+	_, err := map_row_to_struct(Test_User, desc, row_bad_int)
+	p_err, is_proto := err.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto, "expected pgerr.Protocol_Error for bad integer text")
+	testing.expect_value(t, p_err.type, pgerr.Protocol_Error_Type.Column_Decode_Failed)
+
+	// NULL array element cannot be represented in []i32.
+	S :: struct {
+		tags: []i32,
+	}
+	desc_arr := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{{name = "tags"}},
+	}
+	row_null_elem := pgproto.Msg_Data_Row{
+		values = []pgproto.Column_Value{text_col("{1,NULL,3}")},
+	}
+	_, err_arr := map_row_to_struct(S, desc_arr, row_null_elem)
+	p_err_arr, is_proto_arr := err_arr.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto_arr, "expected pgerr.Protocol_Error for NULL array element")
+	testing.expect_value(t, p_err_arr.type, pgerr.Protocol_Error_Type.Column_Decode_Failed)
+
+	// Unsupported target types must fail loudly instead of staying zero-valued.
+	U :: struct {
+		big: i128,
+	}
+	desc_u := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{{name = "big"}},
+	}
+	row_u := pgproto.Msg_Data_Row{
+		values = []pgproto.Column_Value{text_col("1")},
+	}
+	_, err_u := map_row_to_struct(U, desc_u, row_u)
+	p_err_u, is_proto_u := err_u.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto_u, "expected pgerr.Protocol_Error for unsupported target type")
+	testing.expect_value(t, p_err_u.type, pgerr.Protocol_Error_Type.Column_Decode_Failed)
+}
+
+@(test)
 test_map_row_to_struct_column_count_mismatch :: proc(t: ^testing.T) {
 	desc := pgproto.Msg_Row_Description{
 		fields = []pgproto.Field_Description{
@@ -280,6 +328,81 @@ test_map_row_to_struct_binary_format :: proc(t: ^testing.T) {
 	testing.expect_value(t, u.active, true)
 }
 
+// Regression (code review C1): non-i32 integer slices were decoded through
+// decode_text_array_i32 and written via (^[]i32), corrupting element layout
+// and reading past the allocation. Every element width/kind now decodes
+// through its own codec and is written via the matching slice type.
+Test_Typed_Slices :: struct {
+	i16s:  []i16,
+	i64s:  []i64,
+	f32s:  []f32,
+	f64s:  []f64,
+	bools: []bool,
+}
+
+@(test)
+test_map_row_to_struct_typed_slices :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	desc := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{
+			{name = "i16s"},
+			{name = "i64s"},
+			{name = "f32s"},
+			{name = "f64s"},
+			{name = "bools"},
+		},
+	}
+	row := pgproto.Msg_Data_Row{
+		values = []pgproto.Column_Value{
+			text_col("{300,-400}"),
+			text_col("{9000000000,-9000000001,3}"),
+			text_col("{1.5,-2.25}"),
+			text_col("{0.125,123456.789}"),
+			text_col("{t,f}"),
+		},
+	}
+
+	res, err := map_row_to_struct(Test_Typed_Slices, desc, row, tracked)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(res.i16s), 2)
+	if len(res.i16s) == 2 {
+		testing.expect_value(t, res.i16s[0], i16(300))
+		testing.expect_value(t, res.i16s[1], i16(-400))
+	}
+	testing.expect_value(t, len(res.i64s), 3)
+	if len(res.i64s) == 3 {
+		testing.expect_value(t, res.i64s[0], i64(9000000000))
+		testing.expect_value(t, res.i64s[1], i64(-9000000001))
+		testing.expect_value(t, res.i64s[2], i64(3))
+	}
+	testing.expect_value(t, len(res.f32s), 2)
+	if len(res.f32s) == 2 {
+		testing.expect_value(t, res.f32s[0], f32(1.5))
+		testing.expect_value(t, res.f32s[1], f32(-2.25))
+	}
+	testing.expect_value(t, len(res.f64s), 2)
+	if len(res.f64s) == 2 {
+		testing.expect_value(t, res.f64s[0], 0.125)
+		testing.expect_value(t, res.f64s[1], 123456.789)
+	}
+	testing.expect_value(t, len(res.bools), 2)
+	if len(res.bools) == 2 {
+		testing.expect_value(t, res.bools[0], true)
+		testing.expect_value(t, res.bools[1], false)
+	}
+
+	delete(res.i16s, tracked)
+	delete(res.i64s, tracked)
+	delete(res.f32s, tracked)
+	delete(res.f64s, tracked)
+	delete(res.bools, tracked)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 @(test)
 test_map_rows_to_slice :: proc(t: ^testing.T) {
 	desc := pgproto.Msg_Row_Description{
@@ -390,4 +513,52 @@ test_map_rows_to_slice_tracking_allocator :: proc(t: ^testing.T) {
 	delete(slice_res, tracked)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+// Coverage gap: Maybe(time.Time) with a non-NULL value must decode through
+// the union into a real instant.
+@(test)
+test_map_row_to_struct_maybe_time_non_nil :: proc(t: ^testing.T) {
+	S :: struct {
+		updated_at: Maybe(time.Time),
+	}
+	desc := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{{name = "updated_at"}},
+	}
+	row := pgproto.Msg_Data_Row{
+		values = []pgproto.Column_Value{text_col("2024-03-15 10:30:00.5+02")},
+	}
+
+	res, err := map_row_to_struct(S, desc, row)
+	testing.expect_value(t, err, nil)
+	testing.expect(t, res.updated_at != nil, "expected non-nil Maybe(time.Time)")
+	if ts, ok := res.updated_at.(time.Time); ok {
+		// 10:30:00.5+02 is 08:30:00.5 UTC.
+		want, want_ok := time.datetime_to_time(2024, 3, 15, 8, 30, 0, 500_000_000)
+		testing.expect(t, want_ok)
+		testing.expect_value(t, time.to_unix_nanoseconds(ts), time.to_unix_nanoseconds(want))
+	} else {
+		testing.expect(t, false, "Maybe variant must be time.Time")
+	}
+}
+
+// Coverage gap: map_rows_to_slice must propagate the error and free the
+// result slice when a later row fails to map. Inner allocations of earlier
+// rows are documented to remain (temp allocator by default).
+@(test)
+test_map_rows_to_slice_error_path :: proc(t: ^testing.T) {
+	desc := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{{name = "id"}},
+	}
+	rows := []pgproto.Msg_Data_Row{
+		{values = []pgproto.Column_Value{text_col("1")}},
+		{values = []pgproto.Column_Value{text_col("not-a-number")}},
+	}
+
+	out, err := map_rows_to_slice(Test_User, desc, rows)
+	testing.expect(t, err != nil, "expected mapping error on second row")
+	testing.expect(t, out == nil)
+	p_err, is_proto := err.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto)
+	testing.expect_value(t, p_err.type, pgerr.Protocol_Error_Type.Column_Decode_Failed)
 }

@@ -248,4 +248,126 @@ test_packet_framing :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_reader_writer_structs :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+
+	w: Writer
+	writer_init(&w, &buf)
+
+	l_pos := writer_begin_packet(&w, 'P')
+	writer_write_string_nt(&w, "stmt_1")
+	writer_write_string_nt(&w, "SELECT $1::int4;")
+	writer_write_i16(&w, 1)
+	writer_write_u32(&w, 23) // INT4OID
+	writer_end_packet(&w, l_pos)
+
+	r: Reader
+	reader_init(&r, buf[:])
+	testing.expect_value(t, reader_remaining(&r), len(buf))
+	testing.expect(t, reader_has_bytes(&r, 5), "should have at least 5 bytes")
+
+	msg_type, ok_t := reader_read_u8(&r)
+	testing.expect(t, ok_t, "read msg_type failed")
+	testing.expect_value(t, msg_type, u8('P'))
+
+	msg_len, ok_l := reader_read_i32(&r)
+	testing.expect(t, ok_l, "read msg_len failed")
+	testing.expect_value(t, msg_len, i32(len(buf) - 1))
+
+	stmt_name, ok_s := reader_read_string_nt(&r)
+	testing.expect(t, ok_s, "read stmt_name failed")
+	testing.expect_value(t, stmt_name, "stmt_1")
+
+	query, ok_q := reader_read_string_nt(&r)
+	testing.expect(t, ok_q, "read query failed")
+	testing.expect_value(t, query, "SELECT $1::int4;")
+
+	num_params, ok_np := reader_read_i16(&r)
+	testing.expect(t, ok_np, "read num_params failed")
+	testing.expect_value(t, num_params, 1)
+
+	param_oid, ok_oid := reader_read_u32(&r)
+	testing.expect(t, ok_oid, "read param_oid failed")
+	testing.expect_value(t, param_oid, 23)
+
+	testing.expect_value(t, reader_remaining(&r), 0)
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_reader_writer_extended :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+
+	w: Writer
+	writer_init(&w, &buf)
+
+	l_pos := writer_begin_packet_untyped(&w)
+	writer_write_u8(&w, 0x11)
+	writer_write_u16(&w, 0x2233)
+	writer_write_i64(&w, 0x0102030405060708)
+	writer_write_bytes(&w, []byte{0xDE, 0xAD, 0xBE, 0xEF})
+	writer_write_string_nt(&w, "cloned_str")
+	writer_end_packet(&w, l_pos)
+
+	r: Reader
+	reader_init(&r, buf[:])
+	testing.expect(t, reader_has_bytes(&r, 4), "has 4 bytes for length")
+	testing.expect(t, !reader_has_bytes(&r, len(buf) + 1), "exceeds buffer")
+	testing.expect(t, !reader_has_bytes(&r, -1), "negative count should return false")
+
+	total_len, ok_len := reader_read_i32(&r)
+	testing.expect(t, ok_len, "read total_len failed")
+	testing.expect_value(t, total_len, i32(len(buf)))
+
+	b_val, ok_b := reader_read_u8(&r)
+	testing.expect(t, ok_b, "read_u8 failed")
+	testing.expect_value(t, b_val, u8(0x11))
+
+	u16_val, ok_u16 := reader_read_u16(&r)
+	testing.expect(t, ok_u16, "read_u16 failed")
+	testing.expect_value(t, u16_val, u16(0x2233))
+
+	i64_val, ok_i64 := reader_read_i64(&r)
+	testing.expect(t, ok_i64, "read_i64 failed")
+	testing.expect_value(t, i64_val, i64(0x0102030405060708))
+
+	bytes_val, ok_bytes := reader_read_bytes(&r, 4)
+	testing.expect(t, ok_bytes, "read_bytes failed")
+	testing.expect_value(t, len(bytes_val), 4)
+	testing.expect_value(t, bytes_val[0], u8(0xDE))
+	testing.expect_value(t, bytes_val[1], u8(0xAD))
+	testing.expect_value(t, bytes_val[2], u8(0xBE))
+	testing.expect_value(t, bytes_val[3], u8(0xEF))
+
+	cloned_s, ok_clone := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, ok_clone, "read_string_nt_clone failed")
+	testing.expect_value(t, cloned_s, "cloned_str")
+
+	testing.expect_value(t, reader_remaining(&r), 0)
+	testing.expect(t, !reader_has_bytes(&r, 1), "should have 0 bytes remaining")
+
+	_, ok_underflow := reader_read_u8(&r)
+	testing.expect(t, !ok_underflow, "read past end should fail")
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 

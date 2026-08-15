@@ -238,3 +238,197 @@ finish_packet :: proc(builder: ^[dynamic]byte, length_pos: int) -> int {
 	return packet_len
 }
 
+/*
+	Reader holds a read-only buffer slice and an internal read offset cursor.
+*/
+Reader :: struct {
+	buf:    []byte,
+	offset: int,
+}
+
+/*
+	Writer holds a pointer to a dynamic byte buffer builder.
+*/
+Writer :: struct {
+	buf: ^[dynamic]byte,
+}
+
+/*
+	reader_init initializes a Reader with the given buffer slice, resetting offset to 0.
+*/
+reader_init :: proc(r: ^Reader, buf: []byte) {
+	r.buf = buf
+	r.offset = 0
+}
+
+/*
+	reader_remaining returns the number of unread bytes remaining in the buffer.
+*/
+reader_remaining :: proc(r: ^Reader) -> int {
+	return max(0, len(r.buf) - r.offset)
+}
+
+/*
+	reader_has_bytes checks if at least `count` bytes are available from current offset.
+*/
+reader_has_bytes :: proc(r: ^Reader, count: int) -> bool {
+	return count >= 0 && r.offset + count <= len(r.buf)
+}
+
+/*
+	reader_read_u8 reads a single byte and advances cursor.
+*/
+reader_read_u8 :: proc(r: ^Reader) -> (u8, bool) {
+	return read_u8(r.buf, &r.offset)
+}
+
+/*
+	reader_read_i16 reads a big-endian 16-bit signed integer and advances cursor.
+*/
+reader_read_i16 :: proc(r: ^Reader) -> (i16, bool) {
+	return read_i16(r.buf, &r.offset)
+}
+
+/*
+	reader_read_u16 reads a big-endian 16-bit unsigned integer and advances cursor.
+*/
+reader_read_u16 :: proc(r: ^Reader) -> (u16, bool) {
+	return read_u16(r.buf, &r.offset)
+}
+
+/*
+	reader_read_i32 reads a big-endian 32-bit signed integer and advances cursor.
+*/
+reader_read_i32 :: proc(r: ^Reader) -> (i32, bool) {
+	return read_i32(r.buf, &r.offset)
+}
+
+/*
+	reader_read_u32 reads a big-endian 32-bit unsigned integer and advances cursor.
+*/
+reader_read_u32 :: proc(r: ^Reader) -> (u32, bool) {
+	return read_u32(r.buf, &r.offset)
+}
+
+/*
+	reader_read_i64 reads a big-endian 64-bit signed integer and advances cursor.
+*/
+reader_read_i64 :: proc(r: ^Reader) -> (i64, bool) {
+	return read_i64(r.buf, &r.offset)
+}
+
+/*
+	reader_read_bytes reads `count` bytes from buffer and advances cursor. Zero-copy.
+*/
+reader_read_bytes :: proc(r: ^Reader, count: int) -> ([]byte, bool) {
+	return read_bytes_counted(r.buf, &r.offset, count)
+}
+
+/*
+	reader_read_string_nt reads a null-terminated UTF-8 string view and advances cursor past null terminator. Zero-copy.
+*/
+reader_read_string_nt :: proc(r: ^Reader) -> (string, bool) {
+	return read_string_nt(r.buf, &r.offset)
+}
+
+/*
+	reader_read_string_nt_clone reads a null-terminated UTF-8 string, cloning it using the provided allocator.
+*/
+reader_read_string_nt_clone :: proc(
+	r: ^Reader,
+	allocator := context.temp_allocator,
+) -> (
+	string,
+	bool,
+) {
+	return read_string_nt_clone(r.buf, &r.offset, allocator)
+}
+
+/*
+	writer_init initializes a Writer pointing to the provided dynamic byte buffer builder.
+*/
+writer_init :: proc(w: ^Writer, builder: ^[dynamic]byte) {
+	w.buf = builder
+}
+
+/*
+	writer_write_u8 appends a single byte.
+*/
+writer_write_u8 :: proc(w: ^Writer, val: u8) {
+	write_u8(w.buf, val)
+}
+
+/*
+	writer_write_i16 appends a big-endian 16-bit signed integer.
+*/
+writer_write_i16 :: proc(w: ^Writer, val: i16) {
+	write_i16(w.buf, val)
+}
+
+/*
+	writer_write_u16 appends a big-endian 16-bit unsigned integer.
+*/
+writer_write_u16 :: proc(w: ^Writer, val: u16) {
+	write_u16(w.buf, val)
+}
+
+/*
+	writer_write_i32 appends a big-endian 32-bit signed integer.
+*/
+writer_write_i32 :: proc(w: ^Writer, val: i32) {
+	write_i32(w.buf, val)
+}
+
+/*
+	writer_write_u32 appends a big-endian 32-bit unsigned integer.
+*/
+writer_write_u32 :: proc(w: ^Writer, val: u32) {
+	write_u32(w.buf, val)
+}
+
+/*
+	writer_write_i64 appends a big-endian 64-bit signed integer.
+*/
+writer_write_i64 :: proc(w: ^Writer, val: i64) {
+	write_i64(w.buf, val)
+}
+
+/*
+	writer_write_bytes appends a byte slice.
+*/
+writer_write_bytes :: proc(w: ^Writer, b: []byte) {
+	write_bytes(w.buf, b)
+}
+
+/*
+	writer_write_string_nt appends a null-terminated UTF-8 string.
+*/
+writer_write_string_nt :: proc(w: ^Writer, s: string) {
+	write_string_nt(w.buf, s)
+}
+
+/*
+	writer_begin_packet appends a 1-byte message type and a 4-byte length placeholder.
+	Returns the offset of the 4-byte length field.
+*/
+writer_begin_packet :: proc(w: ^Writer, msg_type: u8) -> (length_pos: int) {
+	return write_packet_header(w.buf, msg_type)
+}
+
+/*
+	writer_begin_packet_untyped appends a 4-byte length placeholder without a type byte.
+	Returns the offset of the 4-byte length field.
+*/
+writer_begin_packet_untyped :: proc(w: ^Writer) -> (length_pos: int) {
+	return write_packet_header_untyped(w.buf)
+}
+
+/*
+	writer_end_packet finishes the packet framing by calculating packet length and writing
+	it at length_pos in big-endian format.
+*/
+writer_end_packet :: proc(w: ^Writer, length_pos: int) -> int {
+	return finish_packet(w.buf, length_pos)
+}
+
+

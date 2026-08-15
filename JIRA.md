@@ -372,7 +372,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-303] Parameter Binding & SQL Execution Helpers
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgorm`
 - **Files**:
   - `pgorm/exec.odin`
@@ -391,7 +391,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-304] `pgorm` Reflection Unit Tests & Leak Verification
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgorm`
 - **Files**:
   - `pgorm/mapper_test.odin`

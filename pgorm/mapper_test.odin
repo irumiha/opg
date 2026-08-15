@@ -301,3 +301,93 @@ test_map_rows_to_slice :: proc(t: ^testing.T) {
 	testing.expect_value(t, out[1].id, i64(2))
 	testing.expect_value(t, out[1].name, "b")
 }
+
+Test_Numeric_And_Bytes :: struct {
+	i8_val:   i8,
+	i16_val:  i16,
+	i32_val:  i32,
+	i64_val:  i64,
+	f32_val:  f32,
+	f64_val:  f64,
+	raw_data: []byte `db:"data"`,
+}
+
+@(test)
+test_map_row_to_struct_numeric_and_bytea :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	desc := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{
+			{name = "i8_val"},
+			{name = "i16_val"},
+			{name = "i32_val"},
+			{name = "i64_val"},
+			{name = "f32_val"},
+			{name = "f64_val"},
+			{name = "data"},
+		},
+	}
+	row := pgproto.Msg_Data_Row{
+		values = []pgproto.Column_Value{
+			text_col("127"),
+			text_col("32000"),
+			text_col("100000"),
+			text_col("5000000000"),
+			text_col("1.25"),
+			text_col("2.5"),
+			text_col("\\xdeadbeef"),
+		},
+	}
+
+	res, err := map_row_to_struct(Test_Numeric_And_Bytes, desc, row, tracked)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, res.i8_val, i8(127))
+	testing.expect_value(t, res.i16_val, i16(32000))
+	testing.expect_value(t, res.i32_val, i32(100000))
+	testing.expect_value(t, res.i64_val, i64(5000000000))
+	testing.expect_value(t, res.f32_val, f32(1.25))
+	testing.expect_value(t, res.f64_val, f64(2.5))
+	testing.expect_value(t, len(res.raw_data), 4)
+	testing.expect_value(t, res.raw_data[0], u8(0xde))
+	testing.expect_value(t, res.raw_data[3], u8(0xef))
+
+	delete(res.raw_data, tracked)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_map_rows_to_slice_tracking_allocator :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	desc := pgproto.Msg_Row_Description{
+		fields = []pgproto.Field_Description{
+			{name = "id"},
+			{name = "name"},
+		},
+	}
+	rows := []pgproto.Msg_Data_Row{
+		{values = []pgproto.Column_Value{text_col("10"), text_col("item1")}},
+		{values = []pgproto.Column_Value{text_col("20"), text_col("item2")}},
+	}
+
+	slice_res, err := map_rows_to_slice(Test_User, desc, rows, tracked)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, len(slice_res), 2)
+	testing.expect_value(t, slice_res[0].id, i64(10))
+	testing.expect_value(t, slice_res[0].name, "item1")
+	testing.expect_value(t, slice_res[1].id, i64(20))
+	testing.expect_value(t, slice_res[1].name, "item2")
+
+	for item in slice_res {
+		delete(item.name, tracked)
+	}
+	delete(slice_res, tracked)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

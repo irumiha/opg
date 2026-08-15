@@ -121,7 +121,6 @@ map_fields_to_struct :: proc(
 	return nil
 }
 
-@(private="file")
 is_time_type :: proc(ti: ^reflect.Type_Info) -> bool {
 	if ti == nil do return false
 	if ti.id == typeid_of(time.Time) do return true
@@ -317,16 +316,7 @@ decode_value_into_target :: proc(
 	case reflect.Type_Info_Slice:
 		if col_val.is_null do return true
 		elem_base := reflect.type_info_base(variant.elem)
-		#partial switch el in elem_base.variant {
-		case reflect.Type_Info_Integer:
-			arr, ok := decode_text_array_i32(col_val.data, allocator)
-			if ok do (^[]i32)(dst)^ = arr
-			return ok
-		case reflect.Type_Info_String:
-			arr, ok := decode_text_array_string(col_val.data, allocator)
-			if ok do (^[]string)(dst)^ = arr
-			return ok
-		case reflect.Type_Info_Rune:
+		if variant.elem.id == typeid_of(u8) || variant.elem.id == typeid_of(byte) || elem_base.id == typeid_of(u8) {
 			if format == .Binary {
 				bytes, ok := decode_binary_bytea(col_val.data, allocator)
 				if ok do (^[]byte)(dst)^ = bytes
@@ -337,16 +327,15 @@ decode_value_into_target :: proc(
 				return ok
 			}
 		}
-		if variant.elem.id == typeid_of(u8) {
-			if format == .Binary {
-				bytes, ok := decode_binary_bytea(col_val.data, allocator)
-				if ok do (^[]byte)(dst)^ = bytes
-				return ok
-			} else {
-				bytes, ok := decode_text_bytea(col_val.data, allocator)
-				if ok do (^[]byte)(dst)^ = bytes
-				return ok
-			}
+		#partial switch el in elem_base.variant {
+		case reflect.Type_Info_Integer:
+			arr, ok := decode_text_array_i32(col_val.data, allocator)
+			if ok do (^[]i32)(dst)^ = arr
+			return ok
+		case reflect.Type_Info_String:
+			arr, ok := decode_text_array_string(col_val.data, allocator)
+			if ok do (^[]string)(dst)^ = arr
+			return ok
 		}
 	}
 

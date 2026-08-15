@@ -41,6 +41,7 @@ Protocol_Error_Type :: enum {
 	Invalid_Column_Count,
 	Unsupported_Format_Code,
 	Unsupported_Protocol_Version,
+	No_Data,
 }
 
 Protocol_Error :: struct {

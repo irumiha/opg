@@ -111,3 +111,202 @@ test_parse_handshake_messages :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+@(test)
+test_parse_query_result_messages :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// 1. CommandComplete ('C')
+	cc_pkt := []byte{'C', 0x00, 0x00, 0x00, 0x0D, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0x00}
+	msg_cc, n_cc, err_cc := parse_message(cc_pkt)
+	testing.expect_value(t, err_cc, nil)
+	testing.expect_value(t, n_cc, len(cc_pkt))
+	cc, is_cc := msg_cc.(Msg_Command_Complete)
+	testing.expect(t, is_cc, "expected Msg_Command_Complete")
+	testing.expect_value(t, cc.tag, "SELECT 1")
+
+	// 2. EmptyQueryResponse ('I')
+	eq_pkt := []byte{'I', 0x00, 0x00, 0x00, 0x04}
+	msg_eq, n_eq, err_eq := parse_message(eq_pkt)
+	testing.expect_value(t, err_eq, nil)
+	testing.expect_value(t, n_eq, 5)
+	_, is_eq := msg_eq.(Msg_Empty_Query_Response)
+	testing.expect(t, is_eq, "expected Msg_Empty_Query_Response")
+
+	// 3. RowDescription ('T') with 2 columns
+	// Field 1: "id", table_oid 1234, col_attr 1, type_oid 23 (INT4), type_size 4, typmod -1, format 0
+	// Field 2: "name", table_oid 1234, col_attr 2, type_oid 25 (TEXT), type_size -1, typmod -1, format 0
+	var_rd: [dynamic]byte
+	w: Writer
+	writer_init(&w, &var_rd)
+	len_pos := writer_begin_packet(&w, 'T')
+	writer_write_i16(&w, 2) // 2 fields
+	// Col 1
+	writer_write_string_nt(&w, "id")
+	writer_write_u32(&w, 1234)
+	writer_write_i16(&w, 1)
+	writer_write_u32(&w, 23)
+	writer_write_i16(&w, 4)
+	writer_write_i32(&w, -1)
+	writer_write_i16(&w, 0)
+	// Col 2
+	writer_write_string_nt(&w, "name")
+	writer_write_u32(&w, 1234)
+	writer_write_i16(&w, 2)
+	writer_write_u32(&w, 25)
+	writer_write_i16(&w, -1)
+	writer_write_i32(&w, -1)
+	writer_write_i16(&w, 0)
+	writer_end_packet(&w, len_pos)
+
+	msg_rd, n_rd, err_rd := parse_message(var_rd[:])
+	testing.expect_value(t, err_rd, nil)
+	testing.expect_value(t, n_rd, len(var_rd))
+	rd, is_rd := msg_rd.(Msg_Row_Description)
+	testing.expect(t, is_rd, "expected Msg_Row_Description")
+	testing.expect_value(t, len(rd.fields), 2)
+	testing.expect_value(t, rd.fields[0].name, "id")
+	testing.expect_value(t, rd.fields[0].table_oid, u32(1234))
+	testing.expect_value(t, rd.fields[0].column_attr_num, i16(1))
+	testing.expect_value(t, rd.fields[0].type_oid, u32(23))
+	testing.expect_value(t, rd.fields[0].type_size, i16(4))
+	testing.expect_value(t, rd.fields[0].type_modifier, i32(-1))
+	testing.expect_value(t, rd.fields[0].format_code, Field_Format.Text)
+	testing.expect_value(t, rd.fields[1].name, "name")
+	testing.expect_value(t, rd.fields[1].table_oid, u32(1234))
+	testing.expect_value(t, rd.fields[1].column_attr_num, i16(2))
+	testing.expect_value(t, rd.fields[1].type_oid, u32(25))
+	testing.expect_value(t, rd.fields[1].type_size, i16(-1))
+	testing.expect_value(t, rd.fields[1].type_modifier, i32(-1))
+	testing.expect_value(t, rd.fields[1].format_code, Field_Format.Text)
+
+	// 4. DataRow ('D') with 1 valid value and 1 NULL value
+	var_dr: [dynamic]byte
+	writer_init(&w, &var_dr)
+	dr_pos := writer_begin_packet(&w, 'D')
+	writer_write_i16(&w, 2) // 2 columns
+	// Col 1: length 2, bytes "42"
+	writer_write_i32(&w, 2)
+	writer_write_bytes(&w, transmute([]byte)string("42"))
+	// Col 2: NULL (length -1)
+	writer_write_i32(&w, -1)
+	writer_end_packet(&w, dr_pos)
+
+	msg_dr, n_dr, err_dr := parse_message(var_dr[:])
+	testing.expect_value(t, err_dr, nil)
+	testing.expect_value(t, n_dr, len(var_dr))
+	dr, is_dr := msg_dr.(Msg_Data_Row)
+	testing.expect(t, is_dr, "expected Msg_Data_Row")
+	testing.expect_value(t, len(dr.values), 2)
+	testing.expect_value(t, dr.values[0].is_null, false)
+	testing.expect_value(t, string(dr.values[0].data), "42")
+	testing.expect_value(t, dr.values[1].is_null, true)
+	testing.expect_value(t, len(dr.values[1].data), 0)
+
+	delete(var_rd)
+	delete(var_dr)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_parse_query_result_edge_cases :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// RowDescription with 0 fields
+	var_rd0: [dynamic]byte
+	w: Writer
+	writer_init(&w, &var_rd0)
+	pos := writer_begin_packet(&w, 'T')
+	writer_write_i16(&w, 0)
+	writer_end_packet(&w, pos)
+	msg_rd0, _, err_rd0 := parse_message(var_rd0[:])
+	testing.expect_value(t, err_rd0, nil)
+	rd0, is_rd0 := msg_rd0.(Msg_Row_Description)
+	testing.expect(t, is_rd0, "expected Msg_Row_Description")
+	testing.expect_value(t, len(rd0.fields), 0)
+
+	// Direct call to parse_row_description with invalid/negative field count
+	bad_rd_payload := []byte{0xFF, 0xFF} // -1 fields
+	_, err_bad_rd := parse_row_description(bad_rd_payload)
+	testing.expect(t, err_bad_rd != nil, "expected error on negative field count")
+
+	// Direct call to parse_row_description truncated payload
+	short_rd := []byte{0x00}
+	_, err_short_rd := parse_row_description(short_rd)
+	testing.expect(t, err_short_rd != nil, "expected error on short row description payload")
+
+	// RowDescription truncated in field data
+	var_rd_trunc: [dynamic]byte
+	writer_init(&w, &var_rd_trunc)
+	pos_t := writer_begin_packet(&w, 'T')
+	writer_write_i16(&w, 1)
+	writer_write_string_nt(&w, "col1")
+	writer_write_u32(&w, 100)
+	// truncated before remaining field metadata
+	writer_end_packet(&w, pos_t)
+	_, _, err_rd_trunc := parse_message(var_rd_trunc[:])
+	testing.expect(t, err_rd_trunc != nil, "expected error on truncated field description")
+
+	// DataRow with 0 columns
+	var_dr0: [dynamic]byte
+	writer_init(&w, &var_dr0)
+	dr0_pos := writer_begin_packet(&w, 'D')
+	writer_write_i16(&w, 0)
+	writer_end_packet(&w, dr0_pos)
+	msg_dr0, _, err_dr0 := parse_message(var_dr0[:])
+	testing.expect_value(t, err_dr0, nil)
+	dr0, is_dr0 := msg_dr0.(Msg_Data_Row)
+	testing.expect(t, is_dr0, "expected Msg_Data_Row")
+	testing.expect_value(t, len(dr0.values), 0)
+
+	// Direct call to parse_data_row with negative column count
+	bad_dr_payload := []byte{0xFF, 0xFF} // -1 cols
+	_, err_bad_dr := parse_data_row(bad_dr_payload)
+	testing.expect(t, err_bad_dr != nil, "expected error on negative column count")
+
+	// Direct call to parse_data_row truncated payload
+	short_dr := []byte{0x00}
+	_, err_short_dr := parse_data_row(short_dr)
+	testing.expect(t, err_short_dr != nil, "expected error on short data row payload")
+
+	// DataRow with invalid negative length (< -1, e.g. -2)
+	var_dr_bad_len: [dynamic]byte
+	writer_init(&w, &var_dr_bad_len)
+	dr_bl_pos := writer_begin_packet(&w, 'D')
+	writer_write_i16(&w, 1)
+	writer_write_i32(&w, -2)
+	writer_end_packet(&w, dr_bl_pos)
+	_, _, err_dr_bad_len := parse_message(var_dr_bad_len[:])
+	testing.expect(t, err_dr_bad_len != nil, "expected error on col_len < -1")
+
+	// DataRow truncated column value
+	var_dr_trunc: [dynamic]byte
+	writer_init(&w, &var_dr_trunc)
+	dr_tr_pos := writer_begin_packet(&w, 'D')
+	writer_write_i16(&w, 1)
+	writer_write_i32(&w, 10) // specifies 10 bytes
+	writer_write_bytes(&w, transmute([]byte)string("abc")) // only 3 bytes written
+	writer_end_packet(&w, dr_tr_pos)
+	_, _, err_dr_trunc := parse_message(var_dr_trunc[:])
+	testing.expect(t, err_dr_trunc != nil, "expected error on truncated column value")
+
+	// CommandComplete unterminated
+	bad_cc := []byte{'C', 0x00, 0x00, 0x00, 0x08, 'S', 'E', 'L', 'E'}
+	_, _, err_bad_cc := parse_message(bad_cc)
+	testing.expect(t, err_bad_cc != nil, "expected error on unterminated CommandComplete")
+
+	delete(var_rd0)
+	delete(var_rd_trunc)
+	delete(var_dr0)
+	delete(var_dr_bad_len)
+	delete(var_dr_trunc)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

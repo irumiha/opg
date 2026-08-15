@@ -164,6 +164,142 @@ parse_command_complete :: proc(payload: []byte) -> (msg: Msg_Command_Complete, e
 	return Msg_Command_Complete{tag = tag}, nil
 }
 
+/*
+	parse_row_description parses a RowDescription ('T') message payload.
+	Allocates field description slice using allocator (defaults to context.temp_allocator).
+*/
+parse_row_description :: proc(
+	payload: []byte,
+	allocator := context.temp_allocator,
+) -> (
+	msg: Msg_Row_Description,
+	err: opg.Error,
+) {
+	r: Reader
+	reader_init(&r, payload)
+
+	num_fields, ok_num := reader_read_i16(&r)
+	if !ok_num {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "RowDescription payload too short",
+			byte_offset = 0,
+		}
+	}
+	if num_fields < 0 {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid negative field count in RowDescription",
+			byte_offset = 0,
+		}
+	}
+
+	fields := make([]Field_Description, int(num_fields), allocator)
+	for i in 0 ..< int(num_fields) {
+		name, ok_name := reader_read_string_nt(&r)
+		table_oid, ok_toid := reader_read_u32(&r)
+		col_attr, ok_attr := reader_read_i16(&r)
+		type_oid, ok_type := reader_read_u32(&r)
+		type_size, ok_tsize := reader_read_i16(&r)
+		type_mod, ok_tmod := reader_read_i32(&r)
+		fmt_code, ok_fmt := reader_read_i16(&r)
+
+		if !ok_name || !ok_toid || !ok_attr || !ok_type || !ok_tsize || !ok_tmod || !ok_fmt {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Truncated field description in RowDescription",
+				byte_offset = r.offset,
+			}
+		}
+
+		fields[i] = Field_Description{
+			name            = name,
+			table_oid       = table_oid,
+			column_attr_num = col_attr,
+			type_oid        = type_oid,
+			type_size       = type_size,
+			type_modifier   = type_mod,
+			format_code     = Field_Format(fmt_code),
+		}
+	}
+
+	msg.fields = fields
+	return msg, nil
+}
+
+/*
+	parse_data_row parses a DataRow ('D') message payload.
+	Allocates column value slice using allocator (defaults to context.temp_allocator).
+	Handles NULL column representation (length == -1 -> is_null: true, data: nil).
+*/
+parse_data_row :: proc(
+	payload: []byte,
+	allocator := context.temp_allocator,
+) -> (
+	msg: Msg_Data_Row,
+	err: opg.Error,
+) {
+	r: Reader
+	reader_init(&r, payload)
+
+	num_cols, ok_num := reader_read_i16(&r)
+	if !ok_num {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "DataRow payload too short",
+			byte_offset = 0,
+		}
+	}
+	if num_cols < 0 {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid negative column count in DataRow",
+			byte_offset = 0,
+		}
+	}
+
+	values := make([]Column_Value, int(num_cols), allocator)
+	for i in 0 ..< int(num_cols) {
+		col_len, ok_len := reader_read_i32(&r)
+		if !ok_len {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Truncated column length in DataRow",
+				byte_offset = r.offset,
+			}
+		}
+
+		if col_len == -1 {
+			values[i] = Column_Value{
+				is_null = true,
+				data    = nil,
+			}
+		} else if col_len < -1 {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Invalid negative column length in DataRow",
+				byte_offset = r.offset,
+			}
+		} else {
+			col_data, ok_data := reader_read_bytes(&r, int(col_len))
+			if !ok_data {
+				return {}, opg.Protocol_Error{
+					type = .Malformed_Packet,
+					message = "Truncated column data in DataRow",
+					byte_offset = r.offset,
+				}
+			}
+			values[i] = Column_Value{
+				is_null = false,
+				data    = col_data,
+			}
+		}
+	}
+
+	msg.values = values
+	return msg, nil
+}
+
 // ----------------------------------------------------------------------------
 // Main Message Parser
 // ----------------------------------------------------------------------------
@@ -244,9 +380,18 @@ parse_message :: proc(
 		cc := parse_command_complete(payload) or_return
 		return cc, total_msg_len, nil
 
-	case .Row_Description,
-	     .Data_Row,
-	     .Error_Response,
+	case .Row_Description:
+		rd := parse_row_description(payload, allocator) or_return
+		return rd, total_msg_len, nil
+
+	case .Data_Row:
+		dr := parse_data_row(payload, allocator) or_return
+		return dr, total_msg_len, nil
+
+	case .Empty_Query_Response:
+		return Msg_Empty_Query_Response{}, total_msg_len, nil
+
+	case .Error_Response,
 	     .Notice_Response,
 	     .Bind_Complete,
 	     .Close_Complete,
@@ -255,7 +400,6 @@ parse_message :: proc(
 	     .Copy_In_Response,
 	     .Copy_Out_Response,
 	     .Copy_Both_Response,
-	     .Empty_Query_Response,
 	     .Function_Call_Response,
 	     .Negotiate_Protocol_Ver,
 	     .No_Data,
@@ -263,7 +407,7 @@ parse_message :: proc(
 	     .Parameter_Description,
 	     .Parse_Complete,
 	     .Portal_Suspended:
-		// Stubs for remaining backend messages - implemented in Tasks 2, 3, 4
+		// Stubs for remaining backend messages - implemented in Tasks 3, 4
 		return nil, total_msg_len, nil
 	}
 

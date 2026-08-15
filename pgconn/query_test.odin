@@ -1,5 +1,6 @@
 package pgconn
 
+import "core:encoding/endian"
 import "core:mem"
 import "core:strings"
 import "core:testing"
@@ -597,6 +598,111 @@ test_conn_query_null_column_and_nil_callbacks :: proc(t: ^testing.T) {
 	}
 	delete(collector.rows)
 
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_query_error_response_and_drain :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .In_Transaction
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	// Server responses:
+	// 1. ErrorResponse: 'E', len, 'S', "ERROR\0", 'C', "42P01\0", 'M', "relation does not exist\0", '\0'
+	// 2. ReadyForQuery: 'Z', len 5, 'E' (Failed_Transaction)
+	err_builder := make([dynamic]byte, context.temp_allocator)
+	append(&err_builder, 'E')
+	append(&err_builder, 0, 0, 0, 0)
+	append(&err_builder, 'S')
+	append(&err_builder, "ERROR")
+	append(&err_builder, 0)
+	append(&err_builder, 'C')
+	append(&err_builder, "42P01")
+	append(&err_builder, 0)
+	append(&err_builder, 'M')
+	append(&err_builder, "relation does not exist")
+	append(&err_builder, 0)
+	append(&err_builder, 0)
+	endian.put_i32(err_builder[1:5], .Big, i32(len(err_builder) - 1))
+
+	rfq := []byte{'Z', 0, 0, 0, 5, 'E'}
+
+	append(&mock.read_chunks, err_builder[:])
+	append(&mock.read_chunks, rfq)
+
+	err := conn_query(conn, "SELECT * FROM nonexistent;")
+	testing.expect(t, err != nil, "expected error")
+	pg_err, ok := err.(pgerr.Postgres_Error)
+	testing.expect(t, ok, "expected Postgres_Error")
+	testing.expect_value(t, pg_err.code, "42P01")
+	testing.expect_value(t, pg_err.message, "relation does not exist")
+
+	// Connection status transitioned to Failed_Transaction on ReadyForQuery
+	testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
+	testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Failed_Transaction)
+
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_query_early_abort_row_streaming :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	// 2 rows sent by server, but callback returns false after first row
+	row1 := []byte{'D', 0, 0, 0, 11, 0, 1, 0, 0, 0, 1, '1'}
+	row2 := []byte{'D', 0, 0, 0, 11, 0, 1, 0, 0, 0, 1, '2'}
+	cmd := []byte{'C', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '2', 0}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, row1)
+	append(&mock.read_chunks, row2)
+	append(&mock.read_chunks, cmd)
+	append(&mock.read_chunks, rfq)
+
+	row_count := 0
+	on_aborting_row :: proc(user_data: rawptr, row: pgproto.Msg_Data_Row) -> bool {
+		count := (^int)(user_data)
+		count^ += 1
+		return false // Abort after first
+	}
+
+	err := conn_query(conn, "SELECT generate_series(1,2);", on_row = on_aborting_row, user_data = &row_count)
+	testing.expect(t, err == nil, "expected clean return even on early abort")
+	testing.expect_value(t, row_count, 1)
+	testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+	conn_close(conn)
+	free(conn, context.allocator)
 	mock_transport_destroy(&mock)
 
 	testing.expect_value(t, len(track.allocation_map), 0)

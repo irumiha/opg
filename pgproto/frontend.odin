@@ -46,12 +46,8 @@ Msg_Query :: struct {
 
 Msg_Terminate :: struct {}
 
-Describe_Target :: enum u8 {
-	Statement = 'S',
-	Portal    = 'P',
-}
-
-Close_Target :: enum u8 {
+// Target of a Describe ('D') or Close ('C') message.
+Target_Kind :: enum u8 {
 	Statement = 'S',
 	Portal    = 'P',
 }
@@ -76,7 +72,7 @@ Msg_Bind :: struct {
 }
 
 Msg_Describe :: struct {
-	target_type: Describe_Target,
+	target_type: Target_Kind,
 	name:        string,
 }
 
@@ -89,7 +85,7 @@ Msg_Sync :: struct {}
 Msg_Flush :: struct {}
 
 Msg_Close :: struct {
-	target_type: Close_Target,
+	target_type: Target_Kind,
 	name:        string,
 }
 
@@ -280,7 +276,7 @@ encode_bind :: proc(builder: ^[dynamic]byte, msg: Msg_Bind) -> (bytes_written: i
 
 encode_describe :: proc(
 	builder: ^[dynamic]byte,
-	target_type: Describe_Target,
+	target_type: Target_Kind,
 	name: string = "",
 ) -> int {
 	start_len := len(builder)
@@ -320,7 +316,7 @@ encode_flush :: proc(builder: ^[dynamic]byte) -> int {
 
 encode_close :: proc(
 	builder: ^[dynamic]byte,
-	target_type: Close_Target,
+	target_type: Target_Kind,
 	name: string = "",
 ) -> int {
 	start_len := len(builder)

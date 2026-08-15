@@ -65,35 +65,12 @@ FRONTEND_FIXTURES :: [?]string{
 }
 
 is_valid_backend_type :: proc(b: u8) -> bool {
-	#partial switch Backend_Message_Type(b) {
-	case .Authentication,
-	     .Backend_Key_Data,
-	     .Bind_Complete,
-	     .Close_Complete,
-	     .Command_Complete,
-	     .Copy_Data,
-	     .Copy_Done,
-	     .Copy_In_Response,
-	     .Copy_Out_Response,
-	     .Copy_Both_Response,
-	     .Data_Row,
-	     .Empty_Query_Response,
-	     .Error_Response,
-	     .Function_Call_Response,
-	     .Negotiate_Protocol_Ver,
-	     .No_Data,
-	     .Notice_Response,
-	     .Notification_Response,
-	     .Parameter_Description,
-	     .Parameter_Status,
-	     .Parse_Complete,
-	     .Portal_Suspended,
-	     .Ready_For_Query,
-	     .Row_Description:
-		return true
-	case:
-		return false
+	for v in Backend_Message_Type {
+		if u8(v) == b {
+			return true
+		}
 	}
+	return false
 }
 
 @(test)

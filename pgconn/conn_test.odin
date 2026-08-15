@@ -397,7 +397,7 @@ test_conn_handshake_unexpected_message :: proc(t: ^testing.T) {
 // Scram_Server_Mock simulates a PostgreSQL backend performing SCRAM-SHA-256 authentication
 Scram_Server_Mock :: struct {
 	password:            string,
-	salt:                []byte,
+	salt:                [16]byte,
 	step:                int,
 	client_nonce:        string,
 	server_first:        string,
@@ -412,7 +412,7 @@ Scram_Server_Mock :: struct {
 
 scram_server_mock_init :: proc(m: ^Scram_Server_Mock, password: string, allocator := context.allocator) {
 	m.password = password
-	m.salt = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	m.salt = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
 	m.step = 0
 	m.allocator = allocator
 	m.read_buffer = make([dynamic]byte, allocator)
@@ -468,7 +468,7 @@ scram_mock_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err
 			}
 
 			combined_nonce := strings.concatenate({m.client_nonce, "SERVEREXTRA1234567890"}, context.temp_allocator)
-			salt_b64 := base64.encode(m.salt, allocator = context.temp_allocator)
+			salt_b64 := base64.encode(m.salt[:], allocator = context.temp_allocator)
 			m.server_first = strings.concatenate({"r=", combined_nonce, ",s=", salt_b64, ",i=4096"}, m.allocator)
 
 			append(&m.read_buffer, 'R')
@@ -491,7 +491,7 @@ scram_mock_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err
 				server_final = "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 			} else {
 				salted_password: [32]byte
-				pbkdf2.derive(.SHA256, transmute([]byte)m.password, m.salt, 4096, salted_password[:])
+				pbkdf2.derive(.SHA256, transmute([]byte)m.password, m.salt[:], 4096, salted_password[:])
 				server_key: [32]byte
 				hmac.sum(.SHA256, server_key[:], transmute([]byte)string("Server Key"), salted_password[:])
 				server_sig: [32]byte

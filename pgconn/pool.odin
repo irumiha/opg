@@ -1,42 +1,13 @@
 package pgconn
 
 import "core:mem"
-import "core:net"
 import "core:sync"
 import "core:time"
 import "../pgerr" // Imports driver error types
 
 // ----------------------------------------------------------------------------
-// Connection State and Configuration
+// Connection Pool State and Configuration
 // ----------------------------------------------------------------------------
-
-Conn_Status :: enum {
-	Disconnected,
-	Connecting,
-	Authenticating,
-	Ready,
-	In_Transaction,
-	Busy,
-	Closed,
-}
-
-/*
-	Conn represents a single persistent PostgreSQL client connection over TCP.
-
-	ARCHITECTURAL RULES:
-	- Rule 1 (3-Layer Architecture): pgconn manages sockets, I/O, and connection state.
-	- Rule 3 (Strict Allocator Boundaries): Conn MUST use a persistent allocator (or dedicated arena)
-	  for long-lived socket states, connection properties, and prepared statement caches.
-*/
-Conn :: struct {
-	socket:         net.TCP_Socket,
-	status:         Conn_Status,
-	backend_pid:    i32,
-	backend_secret: i32,
-	parameters:     map[string]string, // Server runtime parameters (e.g. server_version, client_encoding)
-	allocator:      mem.Allocator,     // Persistent allocator for connection lifecycle
-	last_active:    time.Time,
-}
 
 Pool_Config :: struct {
 	host:               string,
@@ -167,16 +138,14 @@ pool_destroy :: proc(pool: ^Pool) {
 
 	// Close all idle connections
 	for conn in pool.available {
-		net.close(conn.socket)
-		delete(conn.parameters)
+		conn_close(conn)
 		free(conn, pool.allocator)
 	}
 	delete(pool.available)
 
 	// Close all in-use connections
 	for conn in pool.in_use {
-		net.close(conn.socket)
-		delete(conn.parameters)
+		conn_close(conn)
 		free(conn, pool.allocator)
 	}
 	delete(pool.in_use)

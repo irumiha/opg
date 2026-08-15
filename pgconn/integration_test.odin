@@ -553,4 +553,134 @@ when OPG_INTEGRATION {
 		testing.expect_value(t, string(captured.payload[:captured.payload_len]), "hello")
 	}
 
+	// ------------------------------------------------------------------------
+	// Extended query protocol & prepared statements
+	// ------------------------------------------------------------------------
+
+	@(test)
+	test_integration_exec_params_text :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		params := []pgproto.Bind_Param{
+			{value = transmute([]byte)string("40")},
+			{value = transmute([]byte)string("2")},
+		}
+		qerr := conn_exec_params(conn, "SELECT $1::int + $2::int;", params, test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected exec_params success, got %v", qerr)
+		testing.expect_value(t, len(collector.rows), 1)
+		if len(collector.rows) == 1 && len(collector.rows[0]) == 1 {
+			testing.expect_value(t, collector.rows[0][0], "42")
+		}
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
+	@(test)
+	test_integration_exec_params_null :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		params := []pgproto.Bind_Param{{is_null = true}}
+		qerr := conn_exec_params(conn, "SELECT $1::text IS NULL;", params, test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected exec_params success, got %v", qerr)
+		if len(collector.rows) == 1 && len(collector.rows[0]) == 1 {
+			testing.expect_value(t, collector.rows[0][0], "t")
+		} else {
+			testing.fail_now(t, "expected exactly one row")
+		}
+	}
+
+	@(test)
+	test_integration_exec_params_type_error_recovery :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		params := []pgproto.Bind_Param{{value = transmute([]byte)string("not-a-number")}}
+		qerr := conn_exec_params(conn, "SELECT $1::int;", params)
+		pg_err, ok := qerr.(pgerr.Postgres_Error)
+		testing.expectf(t, ok, "expected Postgres_Error, got %v", qerr)
+		if ok {
+			testing.expect_value(t, pg_err.code, "22P02") // invalid_text_representation
+		}
+
+		// Extended-protocol errors drain through Sync back to Ready.
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		qerr2 := conn_query(conn, "SELECT 1;")
+		testing.expectf(t, qerr2 == nil, "expected recovery query success, got %v", qerr2)
+	}
+
+	@(test)
+	test_integration_prepared_statement_lifecycle :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		perr := conn_prepare(conn, "itest_stmt", "SELECT $1::int * 2;")
+		testing.expectf(t, perr == nil, "expected prepare success, got %v", perr)
+		_, cached := conn.prepared_statements["itest_stmt"]
+		testing.expect(t, cached, "expected statement in cache")
+
+		// Execute twice with different parameters.
+		params1 := []pgproto.Bind_Param{{value = transmute([]byte)string("21")}}
+		e1 := conn_exec_prepared(conn, "itest_stmt", params1, test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, e1 == nil, "expected first exec success, got %v", e1)
+
+		params2 := []pgproto.Bind_Param{{value = transmute([]byte)string("50")}}
+		e2 := conn_exec_prepared(conn, "itest_stmt", params2, test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, e2 == nil, "expected second exec success, got %v", e2)
+
+		testing.expect_value(t, len(collector.rows), 2)
+		if len(collector.rows) == 2 {
+			testing.expect_value(t, collector.rows[0][0], "42")
+			testing.expect_value(t, collector.rows[1][0], "100")
+		}
+
+		// Re-preparing the same name must replace the server statement and cache.
+		rerr := conn_prepare(conn, "itest_stmt", "SELECT $1::int * 3;")
+		testing.expectf(t, rerr == nil, "expected re-prepare success, got %v", rerr)
+
+		// Close removes it server-side and from the cache; executing afterward
+		// fails with invalid_sql_statement_name.
+		cerr := conn_close_statement(conn, "itest_stmt")
+		testing.expectf(t, cerr == nil, "expected close statement success, got %v", cerr)
+		_, still_cached := conn.prepared_statements["itest_stmt"]
+		testing.expect(t, !still_cached, "expected statement removed from cache")
+
+		e3 := conn_exec_prepared(conn, "itest_stmt", params1)
+		pg_err, ok := e3.(pgerr.Postgres_Error)
+		if ok {
+			testing.expect_value(t, pg_err.code, "26000") // invalid_sql_statement_name
+		} else {
+			// Driver may reject unknown statements client-side before touching
+			// the server; any error is acceptable, silence is not.
+			testing.expect(t, e3 != nil, "expected error executing closed statement")
+		}
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
+	@(test)
+	test_integration_close_portal_noop :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		// Closing the (nonexistent) unnamed portal is a legal no-op round-trip.
+		cerr := conn_close_portal(conn, "")
+		testing.expectf(t, cerr == nil, "expected close portal success, got %v", cerr)
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
 } // when OPG_INTEGRATION

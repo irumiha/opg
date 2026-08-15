@@ -175,7 +175,7 @@ conn_prepare :: proc(
 			if var_recorded_err == nil && conn.prepared_statements != nil {
 				name_clone := strings.clone(name, conn.allocator)
 				query_clone := strings.clone(query, conn.allocator)
-				var oids_clone: []u32 = nil
+				oids_clone: []u32 = nil
 				if param_oids != nil {
 					oids_clone = make([]u32, len(param_oids), conn.allocator)
 					copy(oids_clone, param_oids)

@@ -166,6 +166,11 @@ stream_read_message :: proc(
 	msg: pgproto.Backend_Message,
 	err: pgerr.Error,
 ) {
+	// Compact at entry if read_offset exceeded threshold from previous reads
+	if s.read_offset >= s.compact_threshold {
+		stream_compact(s)
+	}
+
 	for {
 		// 1. Check if we have at least 5 bytes for packet header (1 byte type + 4 bytes length)
 		unread := s.write_offset - s.read_offset
@@ -191,11 +196,6 @@ stream_read_message :: proc(
 				}
 
 				s.read_offset += total_packet_len
-
-				// Check compaction threshold
-				if s.read_offset >= s.compact_threshold {
-					stream_compact(s)
-				}
 
 				return parsed_msg, nil
 			}

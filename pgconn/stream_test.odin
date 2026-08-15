@@ -666,4 +666,67 @@ test_stream_read_parse_error :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_stream_read_borrowed_string_validity_with_compaction :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Msg 1: CommandComplete: 'C', len 15, "SELECT 42\x00" -> total 15 bytes
+		cc_tag := "SELECT 42\x00"
+		cc_bytes := make([]byte, 1 + 4 + len(cc_tag))
+		defer delete(cc_bytes)
+		cc_bytes[0] = 'C'
+		cc_len := u32(4 + len(cc_tag))
+		cc_bytes[1] = byte(cc_len >> 24)
+		cc_bytes[2] = byte(cc_len >> 16)
+		cc_bytes[3] = byte(cc_len >> 8)
+		cc_bytes[4] = byte(cc_len)
+		copy(cc_bytes[5:], cc_tag)
+
+		// Msg 2: ReadyForQuery: 'Z', len 5, 'I' -> total 6 bytes
+		rfq_bytes := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+		// Append both messages in chunks
+		append(&mock.read_chunks, cc_bytes)
+		append(&mock.read_chunks, rfq_bytes)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		// Set compact_threshold = 10 (smaller than Msg 1 length of 15 bytes)
+		stream_init(&stream, transport, initial_capacity = 64, compact_threshold = 10)
+		defer stream_destroy(&stream)
+
+		// 1. Read first message
+		msg1, err1 := stream_read_message(&stream)
+		testing.expect(t, err1 == nil, "expected msg1 success")
+		cc, ok1 := msg1.(pgproto.Msg_Command_Complete)
+		testing.expect(t, ok1, "expected Msg_Command_Complete")
+
+		// Verify read_offset >= compact_threshold (15 >= 10)
+		testing.expect_value(t, stream.read_offset, 15)
+
+		// Crucial assertion: cc.tag borrowed string view is intact and points to "SELECT 42"
+		// without being overwritten or shifted prematurely
+		testing.expect_value(t, cc.tag, "SELECT 42")
+
+		// 2. Read second message: compaction should trigger at the start of stream_read_message
+		msg2, err2 := stream_read_message(&stream)
+		testing.expect(t, err2 == nil, "expected msg2 success")
+		rfq, ok2 := msg2.(pgproto.Msg_Ready_For_Query)
+		testing.expect(t, ok2, "expected Msg_Ready_For_Query")
+		testing.expect_value(t, rfq.status, pgproto.Transaction_Status.Idle)
+		testing.expect_value(t, stream_unread_bytes(&stream), 0)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+
 

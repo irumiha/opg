@@ -856,4 +856,77 @@ when OPG_INTEGRATION {
 		pool_destroy(pool)
 	}
 
+	// ------------------------------------------------------------------------
+	// TLS (OPG-205)
+	// ------------------------------------------------------------------------
+
+	/*
+		integration_expect_ssl connects with the given mode and pins the
+		wire state via pg_stat_ssl for the connection's own backend.
+	*/
+	integration_expect_ssl :: proc(t: ^testing.T, mode: SSL_Mode, expected: string) {
+		cfg := integration_conn_config(t)
+		cfg.ssl_mode = mode
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected connect success (mode %v), got %v", mode, err)
+		if conn == nil {
+			return
+		}
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		qerr := conn_query(conn, "SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid();", test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected pg_stat_ssl query success, got %v", qerr)
+		if len(collector.rows) == 1 && len(collector.rows[0]) == 1 {
+			testing.expect_value(t, collector.rows[0][0], expected)
+		} else {
+			testing.fail_now(t, "expected exactly one row from pg_stat_ssl")
+		}
+	}
+
+	@(test)
+	test_integration_tls_require :: proc(t: ^testing.T) {
+		integration_expect_ssl(t, .Require, "t")
+	}
+
+	@(test)
+	test_integration_tls_prefer_default :: proc(t: ^testing.T) {
+		// Zero value of SSL_Mode is Prefer: the default upgrades to TLS
+		// against an ssl-enabled server.
+		integration_expect_ssl(t, .Prefer, "t")
+	}
+
+	@(test)
+	test_integration_tls_disable :: proc(t: ^testing.T) {
+		integration_expect_ssl(t, .Disable, "f")
+	}
+
+	@(test)
+	test_integration_tls_query_roundtrip :: proc(t: ^testing.T) {
+		cfg := integration_conn_config(t)
+		cfg.ssl_mode = .Require
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected TLS connect success, got %v", err)
+		if conn == nil {
+			return
+		}
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		qerr := conn_query(conn, "SELECT generate_series(1, 100);", test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected TLS query success, got %v", qerr)
+		testing.expect_value(t, len(collector.rows), 100)
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
 } // when OPG_INTEGRATION

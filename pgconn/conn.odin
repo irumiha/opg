@@ -29,6 +29,7 @@ Conn_Config :: struct {
 	connect_timeout:  time.Duration,
 	read_timeout:     time.Duration,
 	write_timeout:    time.Duration,
+	ssl_mode:         SSL_Mode, // zero value = .Prefer (attempt TLS, fall back)
 	on_notice:        Notice_Handler,
 	on_notice_data:   rawptr,
 	on_notification:  Notification_Handler,
@@ -41,6 +42,7 @@ Notification_Handler :: #type proc(user_data: rawptr, notification: pgproto.Msg_
 Conn :: struct {
 	stream:             Stream_Buffer,
 	tcp_data:           TCP_Transport_Data,
+	tls_data:           TLS_Transport_Data,
 	status:             Conn_Status,
 	config:             Conn_Config,
 	backend_pid:        i32,
@@ -212,6 +214,24 @@ conn_connect :: proc(
 	}
 
 	transport := make_tcp_transport(&c.tcp_data, socket)
+
+	// Pre-startup TLS negotiation (SSLRequest). On Wrap_TLS the socket is
+	// handed to OpenSSL and the startup sequence runs over the encrypted
+	// stream; the plaintext transport is discarded without closing.
+	action, neg_err := ssl_negotiate(transport, config.ssl_mode, tls_ensure_loaded())
+	if neg_err != nil {
+		net.close(socket) // stream not initialized yet; close explicitly
+		return nil, neg_err
+	}
+	if action == .Wrap_TLS {
+		tls_transport, tls_err := make_tls_transport(&c.tls_data, socket, config.host)
+		if tls_err != nil {
+			net.close(socket)
+			return nil, tls_err
+		}
+		transport = tls_transport
+	}
+
 	return conn_handshake(c, config, transport, allocator)
 }
 

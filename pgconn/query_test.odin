@@ -1674,6 +1674,69 @@ test_conn_exec_prepared_errors_and_edge_cases :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_conn_exec_params_error_drain :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
 
+	mock: Mock_Transport
+	mock_transport_init(&mock)
 
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
 
+	// Server pipeline error response:
+	// ParseComplete -> ErrorResponse on Bind -> ReadyForQuery
+	parse_ok := []byte{'1', 0, 0, 0, 4}
+	err_builder := make([dynamic]byte, context.temp_allocator)
+	append(&err_builder, 'E')
+	append(&err_builder, 0, 0, 0, 0)
+	append(&err_builder, 'S')
+	append(&err_builder, "ERROR")
+	append(&err_builder, 0)
+	append(&err_builder, 'C')
+	append(&err_builder, "22P02")
+	append(&err_builder, 0)
+	append(&err_builder, 'M')
+	append(&err_builder, "invalid input syntax for type integer")
+	append(&err_builder, 0)
+	append(&err_builder, 0)
+	endian.put_i32(err_builder[1:5], .Big, i32(len(err_builder) - 1))
+
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, parse_ok)
+	append(&mock.read_chunks, err_builder[:])
+	append(&mock.read_chunks, rfq)
+
+	err := conn_exec_params(conn, "SELECT $1::int4;", []pgproto.Bind_Param{{is_null = false, value = transmute([]byte)string("notanumber")}})
+	testing.expect(t, err != nil, "expected error")
+	pg_err, ok := err.(pgerr.Postgres_Error)
+	testing.expect(t, ok, "expected Postgres_Error")
+	testing.expect_value(t, pg_err.code, "22P02")
+	testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_query_dead_connection :: proc(t: ^testing.T) {
+	conn: Conn
+	conn.status = .Closed
+
+	err := conn_query(&conn, "SELECT 1;")
+	testing.expect(t, err != nil, "expected error on closed conn")
+	net_err, ok := err.(pgerr.Net_Error)
+	testing.expect(t, ok, "expected Net_Error")
+	testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+}

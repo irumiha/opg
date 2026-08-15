@@ -1367,11 +1367,18 @@ test_conn_prepared_statement_overwrite_and_conn_close_cleanup :: proc(t: ^testin
 	testing.expect(t, err1 == nil, "expected prepare success")
 	testing.expect_value(t, len(conn.prepared_statements["s1"].param_oids), 2)
 
-	// Overwrite "s1" with new query and 1 param_oid
+	// Overwrite "s1" with new query and 1 param_oid. The server refuses
+	// Parse for an existing name (42P05), so the driver must pipeline
+	// Close('S', "s1") ahead of the re-Parse.
+	close_ok := []byte{'3', 0, 0, 0, 4}
+	append(&mock.read_chunks, close_ok)
 	append(&mock.read_chunks, parse_ok)
 	append(&mock.read_chunks, rfq)
+	written_before := len(mock.written_bytes)
 	err2 := conn_prepare(conn, "s1", "SELECT $1::float8;", []u32{701})
 	testing.expect(t, err2 == nil, "expected overwrite prepare success")
+	testing.expect_value(t, mock.written_bytes[written_before], byte('C'))
+	testing.expect_value(t, mock.written_bytes[written_before + 5], byte('S'))
 	testing.expect_value(t, conn.prepared_statements["s1"].query, "SELECT $1::float8;")
 	testing.expect_value(t, len(conn.prepared_statements["s1"].param_oids), 1)
 

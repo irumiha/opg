@@ -130,6 +130,12 @@ conn_prepare :: proc(
 	pipeline_buf := make([dynamic]byte, context.temp_allocator)
 	defer delete(pipeline_buf)
 
+	// The server refuses Parse for an existing statement name (42P05):
+	// named statements are only replaced after an explicit Close. Closing a
+	// nonexistent statement is a legal no-op, so always close first.
+	if name != "" {
+		pgproto.encode_close(&pipeline_buf, .Statement, name)
+	}
 	pgproto.encode_parse(&pipeline_buf, name, query, param_oids) or_return
 	pgproto.encode_sync(&pipeline_buf)
 
@@ -141,6 +147,9 @@ conn_prepare :: proc(
 		msg := stream_read_message(&conn.stream, context.temp_allocator) or_return
 
 		#partial switch m in msg {
+		case pgproto.Msg_Close_Complete:
+			// Old statement (if any) closed
+
 		case pgproto.Msg_Parse_Complete:
 			// Successfully parsed
 

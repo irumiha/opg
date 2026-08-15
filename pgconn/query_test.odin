@@ -50,6 +50,11 @@ test_on_row_abort :: proc(user_data: rawptr, row: pgproto.Msg_Data_Row) -> bool 
 
 test_on_command :: proc(user_data: rawptr, tag: string, rows_affected: i64) {
 	c := (^Test_Query_Collector)(user_data)
+	// Multi-statement queries fire this once per statement: free the
+	// previous clone before replacing it.
+	if len(c.command_tag) > 0 {
+		delete(c.command_tag, c.allocator)
+	}
 	c.command_tag = strings.clone(tag, c.allocator)
 	c.rows_affected = rows_affected
 }

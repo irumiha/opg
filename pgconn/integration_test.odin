@@ -360,4 +360,197 @@ when OPG_INTEGRATION {
 		testing.expectf(t, qerr2 == nil, "expected query success after cancel, got %v", qerr2)
 	}
 
+	// ------------------------------------------------------------------------
+	// Simple query protocol
+	// ------------------------------------------------------------------------
+
+	@(test)
+	test_integration_multi_row_select :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		qerr := conn_query(conn, "SELECT generate_series(1, 5);", test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected query success, got %v", qerr)
+		testing.expect_value(t, len(collector.rows), 5)
+		testing.expect_value(t, collector.command_tag, "SELECT 5")
+		testing.expect_value(t, collector.rows_affected, 5)
+		if len(collector.rows) == 5 {
+			testing.expect_value(t, collector.rows[0][0], "1")
+			testing.expect_value(t, collector.rows[4][0], "5")
+		}
+	}
+
+	@(test)
+	test_integration_dml_rows_affected :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		// TEMP table: per-connection, parallel-safe, dropped on disconnect.
+		qerr := conn_query(conn, "CREATE TEMP TABLE itest_dml (id int, val text);")
+		testing.expectf(t, qerr == nil, "expected create success, got %v", qerr)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		ins_err := conn_query(conn, "INSERT INTO itest_dml VALUES (1,'a'), (2,'b'), (3,'c');", nil, test_on_command, nil, &collector)
+		testing.expectf(t, ins_err == nil, "expected insert success, got %v", ins_err)
+		testing.expect_value(t, collector.command_tag, "INSERT 0 3")
+		testing.expect_value(t, collector.rows_affected, 3)
+
+		delete(collector.command_tag, context.allocator)
+		collector.command_tag = ""
+		upd_err := conn_query(conn, "UPDATE itest_dml SET val = 'x' WHERE id <= 2;", nil, test_on_command, nil, &collector)
+		testing.expectf(t, upd_err == nil, "expected update success, got %v", upd_err)
+		testing.expect_value(t, collector.command_tag, "UPDATE 2")
+		testing.expect_value(t, collector.rows_affected, 2)
+	}
+
+	@(test)
+	test_integration_multi_statement_and_empty_query :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		// Two statements in one simple query: rows from both accumulate.
+		qerr := conn_query(conn, "SELECT 1; SELECT 2;", test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected multi-statement success, got %v", qerr)
+		testing.expect_value(t, len(collector.rows), 2)
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+		// Empty query string: EmptyQueryResponse path, no error.
+		empty_err := conn_query(conn, "")
+		testing.expectf(t, empty_err == nil, "expected empty query success, got %v", empty_err)
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
+	@(test)
+	test_integration_error_response_and_recovery :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		qerr := conn_query(conn, "SELECT * FROM itest_no_such_table;")
+		pg_err, ok := qerr.(pgerr.Postgres_Error)
+		testing.expectf(t, ok, "expected Postgres_Error, got %v", qerr)
+		if ok {
+			testing.expect_value(t, pg_err.code, "42P01") // undefined_table
+		}
+
+		// The connection drained to ReadyForQuery and stays usable.
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		qerr2 := conn_query(conn, "SELECT 1;")
+		testing.expectf(t, qerr2 == nil, "expected recovery query success, got %v", qerr2)
+	}
+
+	@(test)
+	test_integration_transaction_status_transitions :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		testing.expect(t, conn_query(conn, "BEGIN;") == nil, "expected BEGIN success")
+		testing.expect_value(t, conn.status, Conn_Status.In_Transaction)
+		testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.In_Transaction)
+
+		// An error inside a transaction moves it to failed state.
+		bad_err := conn_query(conn, "SELECT 1/0;")
+		testing.expect(t, bad_err != nil, "expected division by zero error")
+		testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
+
+		testing.expect(t, conn_query(conn, "ROLLBACK;") == nil, "expected ROLLBACK success")
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+		// Commit path.
+		testing.expect(t, conn_query(conn, "BEGIN;") == nil, "expected BEGIN success")
+		testing.expect(t, conn_query(conn, "SELECT 1;") == nil, "expected in-tx query success")
+		testing.expect_value(t, conn.status, Conn_Status.In_Transaction)
+		testing.expect(t, conn_query(conn, "COMMIT;") == nil, "expected COMMIT success")
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
+	Notice_Capture :: struct {
+		count:   int,
+		message: [256]byte,
+		msg_len: int,
+	}
+
+	integration_on_notice :: proc(user_data: rawptr, notice: pgproto.Msg_Notice_Response) {
+		cap_state := (^Notice_Capture)(user_data)
+		cap_state.count += 1
+		cap_state.msg_len = copy(cap_state.message[:], notice.error.message)
+	}
+
+	@(test)
+	test_integration_raise_notice_handler :: proc(t: ^testing.T) {
+		captured: Notice_Capture
+		cfg := integration_conn_config(t)
+		cfg.on_notice = integration_on_notice
+		cfg.on_notice_data = &captured
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected connect success, got %v", err)
+		if conn == nil {
+			testing.fail_now(t, "no connection")
+		}
+		defer integration_disconnect(conn)
+
+		qerr := conn_query(conn, "DO $$ BEGIN RAISE NOTICE 'opg notice test'; END $$;")
+		testing.expectf(t, qerr == nil, "expected DO block success, got %v", qerr)
+		testing.expect_value(t, captured.count, 1)
+		testing.expect_value(t, string(captured.message[:captured.msg_len]), "opg notice test")
+	}
+
+	Notification_Capture :: struct {
+		count:       int,
+		channel:     [128]byte,
+		chan_len:    int,
+		payload:     [128]byte,
+		payload_len: int,
+	}
+
+	integration_on_notification :: proc(user_data: rawptr, notification: pgproto.Msg_Notification_Response) {
+		cap_state := (^Notification_Capture)(user_data)
+		cap_state.count += 1
+		cap_state.chan_len = copy(cap_state.channel[:], notification.channel)
+		cap_state.payload_len = copy(cap_state.payload[:], notification.payload)
+	}
+
+	@(test)
+	test_integration_listen_notify :: proc(t: ^testing.T) {
+		captured: Notification_Capture
+		cfg := integration_conn_config(t)
+		cfg.on_notification = integration_on_notification
+		cfg.on_notif_data = &captured
+
+		listener, lerr := conn_connect(cfg, context.allocator)
+		testing.expectf(t, lerr == nil, "expected listener connect success, got %v", lerr)
+		if listener == nil {
+			testing.fail_now(t, "no listener connection")
+		}
+		defer integration_disconnect(listener)
+
+		notifier := integration_connect(t)
+		defer integration_disconnect(notifier)
+
+		testing.expect(t, conn_query(listener, "LISTEN opg_itest_chan;") == nil, "expected LISTEN success")
+		testing.expect(t, conn_query(notifier, "NOTIFY opg_itest_chan, 'hello';") == nil, "expected NOTIFY success")
+
+		// The notification is delivered when the listener next reads from the
+		// socket; any query triggers that read loop.
+		testing.expect(t, conn_query(listener, "SELECT 1;") == nil, "expected wakeup query success")
+
+		testing.expect_value(t, captured.count, 1)
+		testing.expect_value(t, string(captured.channel[:captured.chan_len]), "opg_itest_chan")
+		testing.expect_value(t, string(captured.payload[:captured.payload_len]), "hello")
+	}
+
 } // when OPG_INTEGRATION

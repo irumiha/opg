@@ -956,3 +956,21 @@ test_parse_allocations_with_tracked_allocator :: proc(t: ^testing.T) {
 	}
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+@(test)
+test_parameter_status_clone_and_destroy :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	src := Msg_Parameter_Status{name = "server_version", value = "16.1"}
+	cloned, err := parameter_status_clone(src, tracked)
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, cloned.name, "server_version")
+	testing.expect_value(t, cloned.value, "16.1")
+	testing.expect(t, raw_data(cloned.name) != raw_data(src.name), "name must be a copy")
+	testing.expect(t, raw_data(cloned.value) != raw_data(src.value), "value must be a copy")
+
+	parameter_status_destroy(cloned, tracked)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

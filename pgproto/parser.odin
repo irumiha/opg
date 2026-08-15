@@ -717,8 +717,9 @@ parse_negotiate_protocol_version :: proc(
 	- Rule 2 (Mandatory Big-Endian Byte Swapping): All header and payload integers (lengths, OIDs, counts)
 	  MUST be parsed using `endian.get_i16(..., .Big)`, `endian.get_i32(..., .Big)`, or `Reader` primitives.
 	  NEVER use raw transmute on numeric wire bytes.
-	- Rule 3 (Strict Allocator Boundaries): All dynamically allocated fields (strings, slices)
-	  MUST use `allocator` which defaults to `context.temp_allocator`. Zero-copy views for strings where applicable.
+	- Rule 3 (Strict Allocator Boundaries): Container slices use `allocator` (defaults to
+	  `context.temp_allocator`); strings and byte fields are zero-copy views into `data`.
+	  See the ZERO-COPY CONTRACT comment on Backend_Message.
 	- Rule 4 (Tagged Union Error Handling): Returns `pgerr.Error` on parse/protocol failures.
 */
 parse_message :: proc(

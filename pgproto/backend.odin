@@ -1,5 +1,7 @@
 package pgproto
 
+import "core:mem"
+import "core:strings"
 import "../pgerr"
 
 // ----------------------------------------------------------------------------
@@ -53,9 +55,9 @@ Auth_Type :: enum i32 {
 
 Msg_Authentication :: struct {
 	auth_type:  Auth_Type,
-	salt:       [4]u8,     // Used when auth_type == .MD5_Password
-	mechanisms: []string, // Used when auth_type == .SASL (allocated in temp_allocator)
-	sasl_data:  string,   // Used for SASL_Continue / SASL_Final / GSS_Continue
+	salt:       [4]u8,    // Used when auth_type == .MD5_Password
+	mechanisms: []string, // .SASL only: name views into the packet; slice allocated via allocator
+	sasl_data:  string,   // SASL_Continue / SASL_Final / GSS_Continue: view into the packet
 }
 
 Msg_Backend_Key_Data :: struct {
@@ -66,6 +68,31 @@ Msg_Backend_Key_Data :: struct {
 Msg_Parameter_Status :: struct {
 	name:  string, // e.g., "server_version", "client_encoding"
 	value: string, // e.g., "16.1", "UTF8"
+}
+
+/*
+	parameter_status_clone deep-copies a Msg_Parameter_Status. Parsed messages
+	borrow from the network read buffer; ParameterStatus values are typically
+	stored for the connection lifetime, so clone them before the buffer is reused.
+*/
+parameter_status_clone :: proc(
+	msg: Msg_Parameter_Status,
+	allocator := context.allocator,
+) -> (
+	res: Msg_Parameter_Status,
+	err: mem.Allocator_Error,
+) {
+	res.name = strings.clone(msg.name, allocator) or_return
+	res.value = strings.clone(msg.value, allocator) or_return
+	return res, nil
+}
+
+/*
+	parameter_status_destroy frees strings previously cloned with parameter_status_clone.
+*/
+parameter_status_destroy :: proc(msg: Msg_Parameter_Status, allocator := context.allocator) {
+	delete(msg.name, allocator)
+	delete(msg.value, allocator)
 }
 
 Transaction_Status :: enum u8 {
@@ -104,16 +131,16 @@ Field_Description :: struct {
 }
 
 Msg_Row_Description :: struct {
-	fields: []Field_Description, // Slice allocated in temp_allocator
+	fields: []Field_Description, // Slice allocated via allocator; field name strings are views into the packet
 }
 
 Column_Value :: struct {
 	is_null: bool,
-	data:    []byte, // Slice into the packet or copied via temp_allocator
+	data:    []byte, // View into the packet buffer
 }
 
 Msg_Data_Row :: struct {
-	values: []Column_Value, // Slice allocated in temp_allocator
+	values: []Column_Value, // Slice allocated via allocator; column data are views into the packet
 }
 
 // ----------------------------------------------------------------------------
@@ -149,7 +176,7 @@ Msg_No_Data :: struct {}
 Msg_Portal_Suspended :: struct {}
 
 Msg_Parameter_Description :: struct {
-	param_oids: []u32, // Slice allocated in temp_allocator
+	param_oids: []u32, // Slice allocated via allocator
 }
 
 // ----------------------------------------------------------------------------
@@ -158,17 +185,17 @@ Msg_Parameter_Description :: struct {
 
 Msg_Copy_In_Response :: struct {
 	overall_format:      Field_Format,
-	column_format_codes: []Field_Format, // Slice allocated in temp_allocator
+	column_format_codes: []Field_Format, // Slice allocated via allocator
 }
 
 Msg_Copy_Out_Response :: struct {
 	overall_format:      Field_Format,
-	column_format_codes: []Field_Format, // Slice allocated in temp_allocator
+	column_format_codes: []Field_Format, // Slice allocated via allocator
 }
 
 Msg_Copy_Both_Response :: struct {
 	overall_format:      Field_Format,
-	column_format_codes: []Field_Format, // Slice allocated in temp_allocator
+	column_format_codes: []Field_Format, // Slice allocated via allocator
 }
 
 Msg_Copy_Data_Backend :: struct {
@@ -188,13 +215,21 @@ Msg_Function_Call_Response :: struct {
 
 Msg_Negotiate_Protocol_Version :: struct {
 	minor_version:        i32,
-	unrecognized_options: []string, // Slices into payload allocated via allocator
+	unrecognized_options: []string, // Option string views into the packet; slice allocated via allocator
 }
 
 // ----------------------------------------------------------------------------
 // Master Backend Message Tagged Union
 // ----------------------------------------------------------------------------
 
+/*
+	ZERO-COPY CONTRACT: parsed messages BORROW from the input packet buffer.
+	Every string and []byte field is a view into the `data` slice passed to
+	parse_message; only container slices (fields, values, mechanisms, oids,
+	format codes) are allocated via the provided allocator. Anything that must
+	outlive the buffer (e.g. ParameterStatus, Postgres_Error) must be cloned —
+	see parameter_status_clone and pgerr.postgres_error_clone.
+*/
 Backend_Message :: union {
 	Msg_Authentication,
 	Msg_Backend_Key_Data,

@@ -300,7 +300,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-207] `pgconn` Integration Tests & Concurrency Verification
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgconn`
 - **Files**:
   - `pgconn/integration_test.odin`
@@ -309,8 +309,8 @@ Layer 4: opg (Public Facade & End-to-End Integration)
   Run full integration test suite against live PostgreSQL instances (`PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`).
 - **Acceptance Criteria**:
   - `odin test pgconn` passes all unit and integration tests.
-  - `odin test pgconn -sanitize:thread` reports zero data races.
-  - Line and branch coverage $\ge 95\%$.
+  - `odin test pgconn -sanitize:thread` reports zero data races (also verified with `-sanitize:address`).
+  - Coverage: manual audit (`docs/pgconn-coverage-audit.md`) — Odin has no coverage instrumentation; every public proc and error path is mapped to a covering test.
 
 ---
 

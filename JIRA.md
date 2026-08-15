@@ -277,7 +277,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-206] Thread-Safe Connection Pool (`Pool`)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgconn`
 - **Files**:
   - `pgconn/pool.odin`

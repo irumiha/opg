@@ -1,6 +1,6 @@
 package pgorm
 
-import "core:mem"
+import "base:intrinsics"
 import "core:reflect"
 import "core:strconv"
 import "core:strings"
@@ -28,16 +28,7 @@ map_row_to_struct :: proc(
 ) -> (
 	result: T,
 	err: pgerr.Error,
-) {
-	ti := reflect.type_info_base(type_info_of(T))
-	struct_info, is_struct := ti.variant.(reflect.Type_Info_Struct)
-	if !is_struct {
-		return result, pgerr.Protocol_Error{
-			type = .Malformed_Data,
-			message = "Target type T must be a struct",
-		}
-	}
-
+) where intrinsics.type_is_struct(T) {
 	// Verify column count matches expected struct fields or handle partial mapping
 	if len(row.values) != len(desc.fields) {
 		return result, pgerr.Protocol_Error{
@@ -47,7 +38,7 @@ map_row_to_struct :: proc(
 	}
 
 	// Iterate over struct fields via core:reflect
-	#no_bounds_check for field, i in reflect.struct_fields_zipped(T) {
+	for field in reflect.struct_fields_zipped(T) {
 		// 1. Determine target column name (check struct tag `db:"..."` first, fallback to field name)
 		col_name := field.name
 		if db_tag, has_tag := reflect.struct_tag_lookup(field.tag, "db"); has_tag {
@@ -128,7 +119,7 @@ map_rows_to_slice :: proc(
 ) -> (
 	result: []T,
 	err: pgerr.Error,
-) {
+) where intrinsics.type_is_struct(T) {
 	out := make([]T, len(rows), allocator)
 	for row, i in rows {
 		item, map_err := map_row_to_struct(T, desc, row, allocator)

@@ -51,6 +51,9 @@ parse_authentication :: proc(
 
 	case .SASL:
 		mechs := make([dynamic]string, allocator)
+		defer if err != nil {
+			delete(mechs)
+		}
 		for {
 			next_byte, has_next := reader_peek_u8(&r)
 			if !has_next {
@@ -208,6 +211,9 @@ parse_row_description :: proc(
 	}
 
 	fields := make([]Field_Description, int(num_fields), allocator)
+	defer if err != nil {
+		delete(fields, allocator)
+	}
 	for i in 0 ..< int(num_fields) {
 		name, ok_name := reader_read_string_nt(&r)
 		table_oid, ok_toid := reader_read_u32(&r)
@@ -286,6 +292,9 @@ parse_data_row :: proc(
 	}
 
 	values := make([]Column_Value, int(num_cols), allocator)
+	defer if err != nil {
+		delete(values, allocator)
+	}
 	for i in 0 ..< int(num_cols) {
 		col_len, ok_len := reader_read_i32(&r)
 		if !ok_len {
@@ -451,6 +460,9 @@ parse_parameter_description :: proc(
 	}
 
 	oids := make([]u32, int(num_params), allocator)
+	defer if err != nil {
+		delete(oids, allocator)
+	}
 	for i in 0 ..< int(num_params) {
 		oid, ok_oid := reader_read_u32(&r)
 		if !ok_oid {
@@ -565,6 +577,9 @@ parse_copy_response :: proc(
 	}
 
 	col_fmts := make([]Field_Format, int(num_cols), allocator)
+	defer if err != nil {
+		delete(col_fmts, allocator)
+	}
 	for i in 0 ..< int(num_cols) {
 		col_fmt, ok_col := reader_read_i16(&r)
 		if !ok_col {
@@ -669,6 +684,9 @@ parse_negotiate_protocol_version :: proc(
 	}
 
 	opts := make([]string, int(num_opts), allocator)
+	defer if err != nil {
+		delete(opts, allocator)
+	}
 	for i in 0 ..< int(num_opts) {
 		opt_str, ok_str := reader_read_string_nt(&r)
 		if !ok_str {

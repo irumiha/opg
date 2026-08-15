@@ -878,3 +878,81 @@ test_parse_unsupported_format_codes :: proc(t: ^testing.T) {
 	testing.expect(t, is_col, "expected Protocol_Error for column copy format")
 	testing.expect_value(t, p_col.type, pgerr.Protocol_Error_Type.Unsupported_Format_Code)
 }
+@(test)
+test_parse_allocations_with_tracked_allocator :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	tracked := mem.tracking_allocator(&track)
+
+	// --- Success path: allocations are exactly the documented containers,
+	// and freeing them leaves zero live allocations.
+	{
+		buf: [dynamic]byte
+		defer delete(buf)
+		pos := write_packet_header(&buf, 'T')
+		write_i16(&buf, 1)
+		write_string_nt(&buf, "id")
+		write_u32(&buf, 0)
+		write_i16(&buf, 0)
+		write_u32(&buf, 23)
+		write_i16(&buf, 4)
+		write_i32(&buf, -1)
+		write_i16(&buf, 0)
+		finish_packet(&buf, pos)
+
+		msg, _, err := parse_message(buf[:], tracked)
+		testing.expect_value(t, err, nil)
+		rd, ok := msg.(Msg_Row_Description)
+		testing.expect(t, ok, "expected Msg_Row_Description")
+		delete(rd.fields, tracked)
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+
+	// --- Error paths: the parser must free its own partial allocations.
+
+	// RowDescription: field count passes the pre-check, name string is
+	// unterminated, so failure happens AFTER the fields slice is allocated.
+	{
+		payload := make([]byte, 22, context.temp_allocator)
+		payload[0] = 0x00
+		payload[1] = 0x01 // 1 field
+		for i in 2 ..< len(payload) {
+			payload[i] = 'a' // no null terminator anywhere
+		}
+		_, err := parse_row_description(payload, tracked)
+		testing.expect(t, err != nil, "expected error on unterminated field name")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+
+	// DataRow: column count passes the pre-check, column length is invalid (-2),
+	// failing after the values slice is allocated.
+	{
+		buf: [dynamic]byte
+		defer delete(buf)
+		pos := write_packet_header(&buf, 'D')
+		write_i16(&buf, 1)
+		write_i32(&buf, -2)
+		finish_packet(&buf, pos)
+		_, _, err := parse_message(buf[:], tracked)
+		testing.expect(t, err != nil, "expected error on col_len -2")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+
+	// Authentication SASL: one valid mechanism (allocates via append), then an
+	// unterminated second mechanism triggers the error path.
+	{
+		payload := []byte{0, 0, 0, 10, 'M', '1', 0x00, 'A', 'B'}
+		_, err := parse_authentication(payload, tracked)
+		testing.expect(t, err != nil, "expected error on unterminated SASL mechanism")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+
+	// NegotiateProtocolVersion: option string unterminated after opts slice allocated.
+	{
+		payload := []byte{0, 0, 0, 1, 0, 0, 0, 1, 'o'}
+		_, err := parse_negotiate_protocol_version(payload, tracked)
+		testing.expect(t, err != nil, "expected error on unterminated option string")
+	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

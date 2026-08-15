@@ -161,3 +161,161 @@ test_pool_destroy_nil :: proc(t: ^testing.T) {
 	pool_destroy(nil) // must not crash
 	testing.expect(t, true, "pool_destroy(nil) is a no-op")
 }
+
+// ----------------------------------------------------------------------------
+// pool_acquire / pool_release fast path
+// ----------------------------------------------------------------------------
+
+@(test)
+test_pool_acquire_reuse_and_dial :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 1, 2))
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	// Reuses the pre-warmed connection, no new dial.
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+	testing.expect(t, c1 != nil, "expected connection")
+	testing.expect_value(t, dialer.dial_count, 1)
+	testing.expect_value(t, len(pool.in_use), 1)
+
+	// Second acquire dials a fresh connection (pool empty, below max).
+	c2, err2 := pool_acquire(pool)
+	testing.expect(t, err2 == nil, "expected acquire success")
+	testing.expect(t, c2 != nil && c2 != c1, "expected distinct second connection")
+	testing.expect_value(t, dialer.dial_count, 2)
+	testing.expect_value(t, len(pool.in_use), 2)
+	testing.expect_value(t, len(pool.available), 0)
+
+	// Release both; LIFO reuse returns the most recently released.
+	testing.expect(t, pool_release(pool, c1) == nil, "expected release success")
+	testing.expect(t, pool_release(pool, c2) == nil, "expected release success")
+	testing.expect_value(t, len(pool.available), 2)
+	testing.expect_value(t, len(pool.in_use), 0)
+
+	c3, err3 := pool_acquire(pool)
+	testing.expect(t, err3 == nil, "expected acquire success")
+	testing.expect(t, c3 == c2, "expected LIFO reuse of last released conn")
+	testing.expect_value(t, dialer.dial_count, 2)
+	testing.expect(t, pool_release(pool, c3) == nil, "expected release success")
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_acquire_timeout_when_exhausted :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	cfg := make_test_pool_config(&dialer, 0, 1)
+	cfg.acquire_timeout = 20 * time.Millisecond // default used when param is 0
+	pool, err := pool_init(cfg)
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected first acquire success")
+
+	// Explicit timeout param.
+	c2, err2 := pool_acquire(pool, 20 * time.Millisecond)
+	testing.expect(t, c2 == nil, "expected nil conn on timeout")
+	perr, ok := err2.(pgerr.Pool_Error)
+	testing.expect(t, ok, "expected Pool_Error")
+	testing.expect_value(t, perr.type, pgerr.Pool_Error_Type.Acquire_Timeout)
+
+	// Config default timeout (param 0).
+	c3, err3 := pool_acquire(pool)
+	testing.expect(t, c3 == nil, "expected nil conn on default timeout")
+	perr3, ok3 := err3.(pgerr.Pool_Error)
+	testing.expect(t, ok3, "expected Pool_Error")
+	testing.expect_value(t, perr3.type, pgerr.Pool_Error_Type.Acquire_Timeout)
+
+	testing.expect(t, pool_release(pool, c1) == nil, "expected release success")
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_acquire_dial_failure :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+	dialer.fail_at_dial = 1
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 0, 2))
+	testing.expect(t, err == nil, "expected pool_init success (no pre-warm)")
+
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, c1 == nil, "expected nil conn on dial failure")
+	nerr, ok := err1.(pgerr.Net_Error)
+	testing.expect(t, ok, "expected Net_Error")
+	testing.expect_value(t, nerr.type, pgerr.Net_Error_Type.Connection_Refused)
+	testing.expect_value(t, pool.pending_dials, 0)
+
+	// One-shot failure cleared: next acquire succeeds.
+	c2, err2 := pool_acquire(pool)
+	testing.expect(t, err2 == nil, "expected acquire success after failure")
+	testing.expect(t, c2 != nil, "expected connection")
+	testing.expect(t, pool_release(pool, c2) == nil, "expected release success")
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_acquire_idle_recycle :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	cfg := make_test_pool_config(&dialer, 1, 2)
+	cfg.idle_timeout = time.Millisecond
+	pool, err := pool_init(cfg)
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	time.sleep(10 * time.Millisecond)
+
+	// Pre-warmed conn exceeded idle_timeout: destroyed, fresh one dialed.
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+	testing.expect(t, c1 != nil, "expected connection")
+	testing.expect_value(t, dialer.dial_count, 2)
+	testing.expect(t, dialer.transports[0].is_closed, "expected stale conn closed")
+
+	testing.expect(t, pool_release(pool, c1) == nil, "expected release success")
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_acquire_nil_pool :: proc(t: ^testing.T) {
+	c, err := pool_acquire(nil)
+	testing.expect(t, c == nil, "expected nil conn from nil pool")
+	perr, ok := err.(pgerr.Pool_Error)
+	testing.expect(t, ok, "expected Pool_Error")
+	testing.expect_value(t, perr.type, pgerr.Pool_Error_Type.Pool_Closed)
+}

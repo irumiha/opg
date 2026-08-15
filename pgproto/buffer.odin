@@ -198,7 +198,7 @@ write_bytes :: proc(builder: ^[dynamic]byte, b: []byte) {
 	write_string_nt appends a null-terminated UTF-8 string to builder.
 */
 write_string_nt :: proc(builder: ^[dynamic]byte, s: string) {
-	append(builder, ..transmute([]byte)s)
+	append(builder, s)
 	append(builder, u8(0x00))
 }
 

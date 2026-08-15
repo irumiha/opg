@@ -3,6 +3,13 @@ package pgproto
 import "core:mem"
 import "core:testing"
 
+/*
+	bytes converts a string to a byte slice.
+*/
+bytes :: proc(s: string) -> []byte {
+	return transmute([]byte)s
+}
+
 @(test)
 test_encode_handshake_messages :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
@@ -97,7 +104,7 @@ test_encode_handshake_messages :: proc(t: ^testing.T) {
 	clear(&buf)
 	sasl_init := Msg_SASL_Initial_Response{
 		mechanism = "SCRAM-SHA-256",
-		data = transmute([]byte)string("n,,n=user,r=nonce"),
+		data = bytes("n,,n=user,r=nonce"),
 	}
 	sasl_len := encode_sasl_initial_response(&buf, sasl_init)
 	testing.expect_value(t, sasl_len, len(buf))
@@ -133,7 +140,7 @@ test_encode_handshake_messages :: proc(t: ^testing.T) {
 
 	// 6. SASLResponse
 	clear(&buf)
-	sasl_resp_len := encode_sasl_response(&buf, transmute([]byte)string("c=biws,r=nonce,p=proof"))
+	sasl_resp_len := encode_sasl_response(&buf, bytes("c=biws,r=nonce,p=proof"))
 	testing.expect_value(t, sasl_resp_len, len(buf))
 	reader_init(&r, buf[:])
 	sr_type, _ := reader_read_u8(&r)
@@ -223,7 +230,7 @@ test_encode_extended_query_messages :: proc(t: ^testing.T) {
 		statement_name = "stmt_1",
 		param_format_codes = []Field_Format{.Text},
 		param_values = []Bind_Param{
-			{is_null = false, value = transmute([]byte)string("42")},
+			{is_null = false, value = bytes("42")},
 			{is_null = true, value = nil},
 		},
 		result_format_codes = []Field_Format{.Binary},
@@ -440,7 +447,7 @@ test_encode_copy_and_dispatcher :: proc(t: ^testing.T) {
 	defer delete(buf)
 
 	// 1. CopyData
-	cd_len := encode_copy_data(&buf, transmute([]byte)string("raw_row_bytes"))
+	cd_len := encode_copy_data(&buf, bytes("raw_row_bytes"))
 	testing.expect_value(t, cd_len, len(buf))
 	r: Reader
 	reader_init(&r, buf[:])
@@ -510,8 +517,8 @@ test_encode_frontend_message_all_variants :: proc(t: ^testing.T) {
 		Msg_SSL_Request{},
 		Msg_Cancel_Request{process_id = 123, secret_key = 456},
 		Msg_Password{password = "secret"},
-		Msg_SASL_Initial_Response{mechanism = "SCRAM-SHA-256", data = transmute([]byte)string("client-first")},
-		Msg_SASL_Response{data = transmute([]byte)string("client-final")},
+		Msg_SASL_Initial_Response{mechanism = "SCRAM-SHA-256", data = bytes("client-first")},
+		Msg_SASL_Response{data = bytes("client-final")},
 		Msg_Query{query = "SELECT 1"},
 		Msg_Parse{statement_name = "s1", query = "SELECT $1", param_oids = []u32{23}},
 		Msg_Bind{portal_name = "p1", statement_name = "s1"},
@@ -521,7 +528,7 @@ test_encode_frontend_message_all_variants :: proc(t: ^testing.T) {
 		Msg_Flush{},
 		Msg_Close{target_type = .Portal, name = "p1"},
 		Msg_Terminate{},
-		Msg_Copy_Data{data = transmute([]byte)string("row-data")},
+		Msg_Copy_Data{data = bytes("row-data")},
 		Msg_Copy_Done{},
 		Msg_Copy_Fail{message = "abort copy"},
 	}
@@ -554,7 +561,7 @@ test_extended_query_pipelining :: proc(t: ^testing.T) {
 	encode_bind(&buf, Msg_Bind{
 		portal_name = "p",
 		statement_name = "stmt",
-		param_values = []Bind_Param{{is_null = false, value = transmute([]byte)string("100")}},
+		param_values = []Bind_Param{{is_null = false, value = bytes("100")}},
 	})
 	encode_describe(&buf, .Portal, "p")
 	encode_execute(&buf, "p", 0)

@@ -1,0 +1,24 @@
+# PostgreSQL for opg integration tests.
+#
+# Started automatically by the integration tests (see
+# pgconn/integration_test.odin) via `docker compose up -d --wait postgres`.
+# The host port is randomly allocated; tests discover it with
+# `docker compose port postgres 5432`. Data lives on tmpfs, so
+# `docker compose down` is a full reset.
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: opg
+      POSTGRES_PASSWORD: opg
+      POSTGRES_DB: opg_test
+    ports:
+      # 127.0.0.1 only, random host port
+      - "127.0.0.1::5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U opg -d opg_test"]
+      interval: 1s
+      timeout: 3s
+      retries: 30

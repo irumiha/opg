@@ -88,3 +88,41 @@ ssl_negotiate :: proc(
 		message = "unexpected server response to SSLRequest",
 	}
 }
+
+when ODIN_OS == .Linux {
+	TLS_PROBE_PATHS :: []string{"libssl.so.3", "libssl.so", "libssl.so.1.1"}
+} else when ODIN_OS == .Darwin {
+	TLS_PROBE_PATHS :: []string{
+		"libssl.3.dylib",
+		"/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib",
+		"/usr/local/opt/openssl@3/lib/libssl.3.dylib",
+	}
+} else when ODIN_OS == .Windows {
+	TLS_PROBE_PATHS :: []string{"libssl-3-x64.dll", "libssl-3.dll", "libssl-1_1-x64.dll"}
+} else {
+	TLS_PROBE_PATHS :: []string{}
+}
+
+/*
+	tls_ensure_loaded probes the platform's OpenSSL library list exactly
+	once per process and reports whether the backend is usable. Safe to
+	call from any thread.
+*/
+tls_ensure_loaded :: proc() -> bool {
+	sync.mutex_lock(&tls_mutex)
+	defer sync.mutex_unlock(&tls_mutex)
+
+	if tls_state == .Unprobed {
+		if tls_probe_paths(TLS_PROBE_PATHS) {
+			tls_state = .Loaded
+		} else {
+			tls_state = .Unavailable
+		}
+	}
+	return tls_state == .Loaded
+}
+
+// tls_probe_paths probes into the process-global `openssl` table.
+tls_probe_paths :: proc(paths: []string) -> bool {
+	return tls_probe_into(&openssl, paths)
+}

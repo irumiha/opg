@@ -104,6 +104,26 @@ test_ssl_negotiate_unexpected_byte :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_tls_probe_bogus_paths_graceful :: proc(t: ^testing.T) {
+	bogus := []string{"libopg_no_such_tls.so.999", "libopg_also_missing.so"}
+	testing.expect(t, !tls_probe_paths(bogus), "expected probe failure for bogus paths")
+}
+
+@(test)
+test_tls_probe_real_openssl :: proc(t: ^testing.T) {
+	// This machine has libssl.so.3 (development requires it; the driver
+	// itself degrades gracefully without it).
+	when ODIN_OS == .Linux {
+		probe: OpenSSL_API
+		ok := tls_probe_into(&probe, TLS_PROBE_PATHS)
+		testing.expect(t, ok, "expected OpenSSL to load on Linux dev machine")
+		testing.expect(t, probe.SSL_CTX_new != nil, "expected SSL_CTX_new bound")
+		testing.expect(t, probe.SSL_connect != nil, "expected SSL_connect bound")
+		testing.expect(t, probe.SSL_ctrl != nil, "expected SSL_ctrl bound")
+	}
+}
+
+@(test)
 test_ssl_negotiate_transport_errors :: proc(t: ^testing.T) {
 	// Write fails (closed transport).
 	mock: Mock_Transport

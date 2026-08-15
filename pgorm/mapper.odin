@@ -4,7 +4,7 @@ import "core:mem"
 import "core:reflect"
 import "core:strconv"
 import "core:strings"
-import ".."         // Imports root package for opg.Error types
+import "../pgerr"   // Imports driver error types
 import "../pgproto" // Imports wire protocol definitions
 
 // ----------------------------------------------------------------------------
@@ -18,7 +18,7 @@ import "../pgproto" // Imports wire protocol definitions
 	- Rule 1 (3-Layer Architecture): pgorm is the high-level mapping layer using `core:reflect`.
 	- Rule 3 (Strict Allocator Boundaries): MUST strictly use `allocator` (defaults to `context.temp_allocator`)
 	  for all dynamically mapped strings, slices, or temporary buffers.
-	- Rule 4 (Tagged Union Error Handling): Returns `opg.Error` on mapping or type mismatch failures.
+	- Rule 4 (Tagged Union Error Handling): Returns `pgerr.Error` on mapping or type mismatch failures.
 */
 map_row_to_struct :: proc(
 	$T: typeid,
@@ -27,12 +27,12 @@ map_row_to_struct :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	result: T,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	ti := reflect.type_info_base(type_info_of(T))
 	struct_info, is_struct := ti.variant.(reflect.Type_Info_Struct)
 	if !is_struct {
-		return result, opg.Protocol_Error{
+		return result, pgerr.Protocol_Error{
 			type = .Malformed_Data,
 			message = "Target type T must be a struct",
 		}
@@ -40,7 +40,7 @@ map_row_to_struct :: proc(
 
 	// Verify column count matches expected struct fields or handle partial mapping
 	if len(row.values) != len(desc.fields) {
-		return result, opg.Protocol_Error{
+		return result, pgerr.Protocol_Error{
 			type = .Invalid_Column_Count,
 			message = "Mismatch between DataRow value count and RowDescription field count",
 		}
@@ -127,7 +127,7 @@ map_rows_to_slice :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	result: []T,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	out := make([]T, len(rows), allocator)
 	for row, i in rows {

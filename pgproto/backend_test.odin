@@ -3,7 +3,7 @@ package pgproto
 import "core:mem"
 import "core:os"
 import "core:testing"
-import ".."
+import "../pgerr"
 
 @(test)
 test_parse_handshake_messages :: proc(t: ^testing.T) {
@@ -338,8 +338,8 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 	msg_e, n_e, err_e := parse_message(var_err[:])
 	testing.expect_value(t, err_e, nil)
 	testing.expect_value(t, n_e, len(var_err))
-	pg_err, is_err := msg_e.(opg.Postgres_Error)
-	testing.expect(t, is_err, "expected opg.Postgres_Error")
+	pg_err, is_err := msg_e.(pgerr.Postgres_Error)
+	testing.expect(t, is_err, "expected pgerr.Postgres_Error")
 	testing.expect_value(t, pg_err.severity, "ERROR")
 	testing.expect_value(t, pg_err.code, "42P01")
 	testing.expect_value(t, pg_err.message, "relation \"nonexistent\" does not exist")
@@ -393,8 +393,8 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 	msg_all, n_all, err_all := parse_message(var_all[:])
 	testing.expect_value(t, err_all, nil)
 	testing.expect_value(t, n_all, len(var_all))
-	all_err, is_all_err := msg_all.(opg.Postgres_Error)
-	testing.expect(t, is_all_err, "expected opg.Postgres_Error for all fields")
+	all_err, is_all_err := msg_all.(pgerr.Postgres_Error)
+	testing.expect(t, is_all_err, "expected pgerr.Postgres_Error for all fields")
 	testing.expect_value(t, all_err.severity, "FATAL")
 	testing.expect_value(t, all_err.code, "28P01")
 	testing.expect_value(t, all_err.message, "password authentication failed")
@@ -440,8 +440,8 @@ test_parse_error_and_notice_edge_cases :: proc(t: ^testing.T) {
 
 	msg_unk, _, err_unk := parse_message(var_unk[:])
 	testing.expect_value(t, err_unk, nil)
-	unk_err, is_unk := msg_unk.(opg.Postgres_Error)
-	testing.expect(t, is_unk, "expected opg.Postgres_Error")
+	unk_err, is_unk := msg_unk.(pgerr.Postgres_Error)
+	testing.expect(t, is_unk, "expected pgerr.Postgres_Error")
 	testing.expect_value(t, unk_err.severity, "ERROR")
 	testing.expect_value(t, unk_err.message, "msg")
 
@@ -767,69 +767,69 @@ test_parse_malformed_and_underflow_packets :: proc(t: ^testing.T) {
 
 	// 1. Header underflow (< 5 bytes)
 	_, _, err1 := parse_message([]byte{'Z', 0, 0})
-	p_err1, ok1 := err1.(opg.Protocol_Error)
+	p_err1, ok1 := err1.(pgerr.Protocol_Error)
 	testing.expect(t, ok1, "expected Protocol_Error")
-	testing.expect_value(t, p_err1.type, opg.Protocol_Error_Type.Buffer_Underflow)
+	testing.expect_value(t, p_err1.type, pgerr.Protocol_Error_Type.Buffer_Underflow)
 
 	// 2. Invalid length header (< 4)
 	_, _, err2 := parse_message([]byte{'Z', 0, 0, 0, 2, 'I'})
-	p_err2, ok2 := err2.(opg.Protocol_Error)
+	p_err2, ok2 := err2.(pgerr.Protocol_Error)
 	testing.expect(t, ok2, "expected Protocol_Error")
-	testing.expect_value(t, p_err2.type, opg.Protocol_Error_Type.Invalid_Length)
+	testing.expect_value(t, p_err2.type, pgerr.Protocol_Error_Type.Invalid_Length)
 
 	// 3. Payload underflow
 	_, _, err3 := parse_message([]byte{'Z', 0, 0, 0, 10, 'I'})
-	p_err3, ok3 := err3.(opg.Protocol_Error)
+	p_err3, ok3 := err3.(pgerr.Protocol_Error)
 	testing.expect(t, ok3, "expected Protocol_Error")
-	testing.expect_value(t, p_err3.type, opg.Protocol_Error_Type.Buffer_Underflow)
+	testing.expect_value(t, p_err3.type, pgerr.Protocol_Error_Type.Buffer_Underflow)
 
 	// 4. Unknown message type
 	_, _, err4 := parse_message([]byte{'?', 0, 0, 0, 4})
-	p_err4, ok4 := err4.(opg.Protocol_Error)
+	p_err4, ok4 := err4.(pgerr.Protocol_Error)
 	testing.expect(t, ok4, "expected Protocol_Error")
-	testing.expect_value(t, p_err4.type, opg.Protocol_Error_Type.Unknown_Message_Type)
+	testing.expect_value(t, p_err4.type, pgerr.Protocol_Error_Type.Unknown_Message_Type)
 
 	// 5. Malformed ReadyForQuery (payload length 0)
 	_, _, err5 := parse_message([]byte{'Z', 0, 0, 0, 4})
-	p_err5, ok5 := err5.(opg.Protocol_Error)
+	p_err5, ok5 := err5.(pgerr.Protocol_Error)
 	testing.expect(t, ok5, "expected Protocol_Error")
-	testing.expect_value(t, p_err5.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err5.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	// 6. Invalid ReadyForQuery status character (not 'I', 'T', 'E')
 	_, _, err6 := parse_message([]byte{'Z', 0, 0, 0, 5, 'X'})
-	p_err6, ok6 := err6.(opg.Protocol_Error)
+	p_err6, ok6 := err6.(pgerr.Protocol_Error)
 	testing.expect(t, ok6, "expected Protocol_Error")
-	testing.expect_value(t, p_err6.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err6.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	// 7. Authentication payload too short (< 4 bytes for auth type)
 	_, _, err7 := parse_message([]byte{'R', 0, 0, 0, 6, 0, 0})
-	p_err7, ok7 := err7.(opg.Protocol_Error)
+	p_err7, ok7 := err7.(pgerr.Protocol_Error)
 	testing.expect(t, ok7, "expected Protocol_Error")
-	testing.expect_value(t, p_err7.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err7.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	// 8. Authentication MD5 missing salt (< 4 bytes salt)
 	_, _, err8 := parse_message([]byte{'R', 0, 0, 0, 10, 0, 0, 0, 5, 1, 2})
-	p_err8, ok8 := err8.(opg.Protocol_Error)
+	p_err8, ok8 := err8.(pgerr.Protocol_Error)
 	testing.expect(t, ok8, "expected Protocol_Error")
-	testing.expect_value(t, p_err8.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err8.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	// 9. Authentication SASL unterminated mechanism string
 	_, _, err9 := parse_message([]byte{'R', 0, 0, 0, 13, 0, 0, 0, 10, 'S', 'C', 'R', 'A', 'M'})
-	p_err9, ok9 := err9.(opg.Protocol_Error)
+	p_err9, ok9 := err9.(pgerr.Protocol_Error)
 	testing.expect(t, ok9, "expected Protocol_Error")
-	testing.expect_value(t, p_err9.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err9.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	// 10. BackendKeyData too short (< 8 bytes payload)
 	_, _, err10 := parse_message([]byte{'K', 0, 0, 0, 8, 0, 0, 0, 1})
-	p_err10, ok10 := err10.(opg.Protocol_Error)
+	p_err10, ok10 := err10.(pgerr.Protocol_Error)
 	testing.expect(t, ok10, "expected Protocol_Error")
-	testing.expect_value(t, p_err10.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err10.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	// 11. ParameterStatus malformed / unterminated strings
 	_, _, err11 := parse_message([]byte{'S', 0, 0, 0, 8, 'k', 'e', 'y', 0})
-	p_err11, ok11 := err11.(opg.Protocol_Error)
+	p_err11, ok11 := err11.(pgerr.Protocol_Error)
 	testing.expect(t, ok11, "expected Protocol_Error")
-	testing.expect_value(t, p_err11.type, opg.Protocol_Error_Type.Malformed_Packet)
+	testing.expect_value(t, p_err11.type, pgerr.Protocol_Error_Type.Malformed_Packet)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }

@@ -5,7 +5,7 @@ import "core:mem"
 import "core:os"
 import "core:slice"
 import "core:testing"
-import opg ".."
+import "../pgerr"
 
 BACKEND_FIXTURES :: [?]string{
 	"pgproto/tests_golden_files/be_auth_ok.bin",
@@ -449,8 +449,8 @@ test_golden_backend_parsers :: proc(t: ^testing.T) {
 	{
 		msg, n := load_and_parse(t, "pgproto/tests_golden_files/be_error_response.bin")
 		testing.expect(t, n > 0, "expected positive bytes consumed")
-		pg_err, ok := msg.(opg.Postgres_Error)
-		testing.expect(t, ok, "expected opg.Postgres_Error")
+		pg_err, ok := msg.(pgerr.Postgres_Error)
+		testing.expect(t, ok, "expected pgerr.Postgres_Error")
 		testing.expect_value(t, pg_err.severity, "ERROR")
 		testing.expect_value(t, pg_err.code, "42P01")
 		testing.expect_value(t, pg_err.message, "relation \"nonexistent\" does not exist")
@@ -644,11 +644,11 @@ test_golden_fuzzing_truncation_matrix :: proc(t: ^testing.T) {
 			testing.expect(t, err != nil, "expected error on truncated packet")
 			testing.expect_value(t, n, 0)
 			testing.expect(t, msg == nil, "expected nil message on truncated packet")
-			proto_err, is_proto_err := err.(opg.Protocol_Error)
+			proto_err, is_proto_err := err.(pgerr.Protocol_Error)
 			testing.expectf(
 				t,
 				is_proto_err,
-				"expected opg.Protocol_Error for %s prefix %d/%d, got %v",
+				"expected pgerr.Protocol_Error for %s prefix %d/%d, got %v",
 				path,
 				prefix,
 				len(raw),
@@ -755,8 +755,8 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 			_, _, err := parse_message(mutated, context.temp_allocator)
 			if is_valid_backend_type(flipped_type) {
 				if err != nil {
-					_, is_proto := err.(opg.Protocol_Error)
-					testing.expect(t, is_proto, "expected opg.Protocol_Error on bit-flipped msg type")
+					_, is_proto := err.(pgerr.Protocol_Error)
+					testing.expect(t, is_proto, "expected pgerr.Protocol_Error on bit-flipped msg type")
 				}
 			} else {
 				testing.expectf(
@@ -767,16 +767,16 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 					bit,
 					path,
 				)
-				proto_err, is_proto := err.(opg.Protocol_Error)
+				proto_err, is_proto := err.(pgerr.Protocol_Error)
 				testing.expectf(
 					t,
 					is_proto,
-					"expected opg.Protocol_Error for unknown type 0x%02x on %s, got %v",
+					"expected pgerr.Protocol_Error for unknown type 0x%02x on %s, got %v",
 					flipped_type,
 					path,
 					err,
 				)
-				testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Unknown_Message_Type)
+				testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Unknown_Message_Type)
 			}
 		}
 
@@ -788,16 +788,16 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 			testing.expect(t, err != nil, "expected error on invalid message type")
 			testing.expect_value(t, n, 0)
 			testing.expect(t, msg == nil, "expected nil message on invalid message type")
-			proto_err, is_proto := err.(opg.Protocol_Error)
+			proto_err, is_proto := err.(pgerr.Protocol_Error)
 			testing.expectf(
 				t,
 				is_proto,
-				"expected opg.Protocol_Error for invalid type 0x%02x on %s, got %v",
+				"expected pgerr.Protocol_Error for invalid type 0x%02x on %s, got %v",
 				inv_type,
 				path,
 				err,
 			)
-			testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Unknown_Message_Type)
+			testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Unknown_Message_Type)
 		}
 
 		// 2. Negative & sub-minimum length values in header
@@ -811,16 +811,16 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 			testing.expect(t, err != nil, "expected error on invalid negative length")
 			testing.expect_value(t, n, 0)
 			testing.expect(t, msg == nil, "expected nil message on invalid negative length")
-			proto_err, is_proto := err.(opg.Protocol_Error)
+			proto_err, is_proto := err.(pgerr.Protocol_Error)
 			testing.expectf(
 				t,
 				is_proto,
-				"expected opg.Protocol_Error for length %d on %s, got %v",
+				"expected pgerr.Protocol_Error for length %d on %s, got %v",
 				neg_len,
 				path,
 				err,
 			)
-			testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Invalid_Length)
+			testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Invalid_Length)
 		}
 
 		// 3. Lengths exceeding payload size (including 2^31 - 1)
@@ -835,16 +835,16 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 			testing.expect(t, err != nil, "expected error on exceeding length")
 			testing.expect_value(t, n, 0)
 			testing.expect(t, msg == nil, "expected nil message on exceeding length")
-			proto_err, is_proto := err.(opg.Protocol_Error)
+			proto_err, is_proto := err.(pgerr.Protocol_Error)
 			testing.expectf(
 				t,
 				is_proto,
-				"expected opg.Protocol_Error for exceeding length %d on %s, got %v",
+				"expected pgerr.Protocol_Error for exceeding length %d on %s, got %v",
 				exc_len,
 				path,
 				err,
 			)
-			testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Buffer_Underflow)
+			testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Buffer_Underflow)
 		}
 	}
 

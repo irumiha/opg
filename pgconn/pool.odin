@@ -4,8 +4,7 @@ import "core:mem"
 import "core:net"
 import "core:sync"
 import "core:time"
-import ".."         // Imports root package for opg.Error types
-import "../pgproto" // Imports wire protocol definitions
+import "../pgerr" // Imports driver error types
 
 // ----------------------------------------------------------------------------
 // Connection State and Configuration
@@ -80,7 +79,7 @@ pool_init :: proc(
 	allocator := context.allocator,
 ) -> (
 	pool: ^Pool,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	// Allocate pool using persistent allocator
 	p := new(Pool, allocator)
@@ -102,13 +101,13 @@ pool_acquire :: proc(
 	timeout := time.Duration(0),
 ) -> (
 	conn: ^Conn,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	sync.mutex_lock(&pool.mutex)
 	defer sync.mutex_unlock(&pool.mutex)
 
 	if pool.is_closed {
-		return nil, opg.Net_Error{
+		return nil, pgerr.Net_Error{
 			type = .Socket_Closed,
 		}
 	}
@@ -121,7 +120,7 @@ pool_acquire :: proc(
 	}
 
 	// Stub: If capacity allows, dial a new TCP socket using core:net / core:nbio
-	return nil, opg.Net_Error{
+	return nil, pgerr.Net_Error{
 		type = .Timeout,
 	}
 }
@@ -133,13 +132,13 @@ pool_release :: proc(
 	pool: ^Pool,
 	conn: ^Conn,
 ) -> (
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	sync.mutex_lock(&pool.mutex)
 	defer sync.mutex_unlock(&pool.mutex)
 
 	if pool.is_closed {
-		return opg.Net_Error{
+		return pgerr.Net_Error{
 			type = .Socket_Closed,
 		}
 	}

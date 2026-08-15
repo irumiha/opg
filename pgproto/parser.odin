@@ -1,7 +1,7 @@
 package pgproto
 
 import "core:encoding/endian"
-import ".." // Imports root package for opg.Error types
+import "../pgerr"
 
 // ----------------------------------------------------------------------------
 // Sub-Parsers for Handshake & Lifecycle Messages
@@ -16,14 +16,14 @@ parse_authentication :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	msg: Msg_Authentication,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	r: Reader
 	reader_init(&r, payload)
 
 	auth_code, ok := reader_read_i32(&r)
 	if !ok {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Authentication payload too short",
 			byte_offset = 0,
@@ -40,7 +40,7 @@ parse_authentication :: proc(
 	case .MD5_Password:
 		salt_bytes, salt_ok := reader_read_bytes(&r, 4)
 		if !salt_ok {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "MD5 Authentication missing 4-byte salt",
 				byte_offset = r.offset,
@@ -61,7 +61,7 @@ parse_authentication :: proc(
 			}
 			mech_str, str_ok := reader_read_string_nt(&r)
 			if !str_ok {
-				return {}, opg.Protocol_Error{
+				return {}, pgerr.Protocol_Error{
 					type = .Malformed_Packet,
 					message = "Unterminated SASL mechanism string",
 					byte_offset = r.offset,
@@ -85,14 +85,14 @@ parse_authentication :: proc(
 /*
 	parse_backend_key_data parses a BackendKeyData ('K') message payload (process ID and secret key).
 */
-parse_backend_key_data :: proc(payload: []byte) -> (msg: Msg_Backend_Key_Data, err: opg.Error) {
+parse_backend_key_data :: proc(payload: []byte) -> (msg: Msg_Backend_Key_Data, err: pgerr.Error) {
 	r: Reader
 	reader_init(&r, payload)
 
 	pid, ok_pid := reader_read_i32(&r)
 	secret, ok_secret := reader_read_i32(&r)
 	if !ok_pid || !ok_secret {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "BackendKeyData payload too short",
 			byte_offset = r.offset,
@@ -104,14 +104,14 @@ parse_backend_key_data :: proc(payload: []byte) -> (msg: Msg_Backend_Key_Data, e
 /*
 	parse_parameter_status parses a ParameterStatus ('S') message payload (name and value strings).
 */
-parse_parameter_status :: proc(payload: []byte) -> (msg: Msg_Parameter_Status, err: opg.Error) {
+parse_parameter_status :: proc(payload: []byte) -> (msg: Msg_Parameter_Status, err: pgerr.Error) {
 	r: Reader
 	reader_init(&r, payload)
 
 	name, ok_name := reader_read_string_nt(&r)
 	value, ok_value := reader_read_string_nt(&r)
 	if !ok_name || !ok_value {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Malformed ParameterStatus payload",
 			byte_offset = r.offset,
@@ -123,13 +123,13 @@ parse_parameter_status :: proc(payload: []byte) -> (msg: Msg_Parameter_Status, e
 /*
 	parse_ready_for_query parses a ReadyForQuery ('Z') message payload (transaction status character).
 */
-parse_ready_for_query :: proc(payload: []byte) -> (msg: Msg_Ready_For_Query, err: opg.Error) {
+parse_ready_for_query :: proc(payload: []byte) -> (msg: Msg_Ready_For_Query, err: pgerr.Error) {
 	r: Reader
 	reader_init(&r, payload)
 
 	status_byte, ok := reader_read_u8(&r)
 	if !ok {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "ReadyForQuery payload too short",
 			byte_offset = 0,
@@ -137,7 +137,7 @@ parse_ready_for_query :: proc(payload: []byte) -> (msg: Msg_Ready_For_Query, err
 	}
 	status := Transaction_Status(status_byte)
 	if status != .Idle && status != .In_Transaction && status != .Failed_Transaction {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid transaction status in ReadyForQuery",
 			byte_offset = 0,
@@ -149,13 +149,13 @@ parse_ready_for_query :: proc(payload: []byte) -> (msg: Msg_Ready_For_Query, err
 /*
 	parse_command_complete parses a CommandComplete ('C') message payload (tag string).
 */
-parse_command_complete :: proc(payload: []byte) -> (msg: Msg_Command_Complete, err: opg.Error) {
+parse_command_complete :: proc(payload: []byte) -> (msg: Msg_Command_Complete, err: pgerr.Error) {
 	r: Reader
 	reader_init(&r, payload)
 
 	tag, ok := reader_read_string_nt(&r)
 	if !ok {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Malformed CommandComplete payload",
 			byte_offset = 0,
@@ -173,28 +173,28 @@ parse_row_description :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	msg: Msg_Row_Description,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	r: Reader
 	reader_init(&r, payload)
 
 	num_fields, ok_num := reader_read_i16(&r)
 	if !ok_num {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "RowDescription payload too short",
 			byte_offset = 0,
 		}
 	}
 	if num_fields < 0 {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid negative field count in RowDescription",
 			byte_offset = 0,
 		}
 	}
 	if int(num_fields) * 18 > reader_remaining(&r) {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "RowDescription payload too short for field count",
 			byte_offset = r.offset,
@@ -212,7 +212,7 @@ parse_row_description :: proc(
 		fmt_code, ok_fmt := reader_read_i16(&r)
 
 		if !ok_name || !ok_toid || !ok_attr || !ok_type || !ok_tsize || !ok_tmod || !ok_fmt {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Truncated field description in RowDescription",
 				byte_offset = r.offset,
@@ -244,28 +244,28 @@ parse_data_row :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	msg: Msg_Data_Row,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	r: Reader
 	reader_init(&r, payload)
 
 	num_cols, ok_num := reader_read_i16(&r)
 	if !ok_num {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "DataRow payload too short",
 			byte_offset = 0,
 		}
 	}
 	if num_cols < 0 {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid negative column count in DataRow",
 			byte_offset = 0,
 		}
 	}
 	if int(num_cols) * 4 > reader_remaining(&r) {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "DataRow payload too short for column count",
 			byte_offset = r.offset,
@@ -276,7 +276,7 @@ parse_data_row :: proc(
 	for i in 0 ..< int(num_cols) {
 		col_len, ok_len := reader_read_i32(&r)
 		if !ok_len {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Truncated column length in DataRow",
 				byte_offset = r.offset,
@@ -289,7 +289,7 @@ parse_data_row :: proc(
 				data    = nil,
 			}
 		} else if col_len < -1 {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Invalid negative column length in DataRow",
 				byte_offset = r.offset,
@@ -297,7 +297,7 @@ parse_data_row :: proc(
 		} else {
 			col_data, ok_data := reader_read_bytes(&r, int(col_len))
 			if !ok_data {
-				return {}, opg.Protocol_Error{
+				return {}, pgerr.Protocol_Error{
 					type = .Malformed_Packet,
 					message = "Truncated column data in DataRow",
 					byte_offset = r.offset,
@@ -321,9 +321,9 @@ parse_data_row :: proc(
 	'W', 's', 't', 'c', 'd', 'n', 'F', 'L', 'R'.
 	Unknown field codes are quietly ignored per PostgreSQL 3.0 protocol specification.
 */
-parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: opg.Postgres_Error, err: opg.Error) {
+parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: pgerr.Postgres_Error, err: pgerr.Error) {
 	if len(payload) == 0 {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Error/Notice payload is empty",
 			byte_offset = 0,
@@ -336,7 +336,7 @@ parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: opg.Postgres_E
 	for {
 		code_byte, ok := reader_read_u8(&r)
 		if !ok {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Error/Notice packet missing terminating null byte",
 				byte_offset = r.offset,
@@ -350,7 +350,7 @@ parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: opg.Postgres_E
 
 		str_val, str_ok := reader_read_string_nt(&r)
 		if !str_ok {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Unterminated string in Error/Notice field",
 				byte_offset = r.offset,
@@ -409,28 +409,28 @@ parse_parameter_description :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	msg: Msg_Parameter_Description,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	r: Reader
 	reader_init(&r, payload)
 
 	num_params, ok_num := reader_read_i16(&r)
 	if !ok_num {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "ParameterDescription payload too short",
 			byte_offset = 0,
 		}
 	}
 	if num_params < 0 {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid negative parameter count in ParameterDescription",
 			byte_offset = 0,
 		}
 	}
 	if int(num_params) * 4 > reader_remaining(&r) {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "ParameterDescription payload too short for parameter count",
 			byte_offset = r.offset,
@@ -441,7 +441,7 @@ parse_parameter_description :: proc(
 	for i in 0 ..< int(num_params) {
 		oid, ok_oid := reader_read_u32(&r)
 		if !ok_oid {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Truncated parameter OID in ParameterDescription",
 				byte_offset = r.offset,
@@ -458,13 +458,13 @@ parse_parameter_description :: proc(
 	parse_notification parses a NotificationResponse ('A') message payload.
 	Extracts process ID, channel name, and notification payload. Zero-copy string views.
 */
-parse_notification :: proc(payload: []byte) -> (msg: Msg_Notification_Response, err: opg.Error) {
+parse_notification :: proc(payload: []byte) -> (msg: Msg_Notification_Response, err: pgerr.Error) {
 	r: Reader
 	reader_init(&r, payload)
 
 	pid, ok_pid := reader_read_i32(&r)
 	if !ok_pid {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "NotificationResponse payload too short",
 			byte_offset = 0,
@@ -473,7 +473,7 @@ parse_notification :: proc(payload: []byte) -> (msg: Msg_Notification_Response, 
 
 	channel, ok_chan := reader_read_string_nt(&r)
 	if !ok_chan {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Unterminated channel string in NotificationResponse",
 			byte_offset = r.offset,
@@ -482,7 +482,7 @@ parse_notification :: proc(payload: []byte) -> (msg: Msg_Notification_Response, 
 
 	notif_payload, ok_payload := reader_read_string_nt(&r)
 	if !ok_payload {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Unterminated payload string in NotificationResponse",
 			byte_offset = r.offset,
@@ -506,14 +506,14 @@ parse_copy_response :: proc(
 ) -> (
 	overall_format: Field_Format,
 	column_format_codes: []Field_Format,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	r: Reader
 	reader_init(&r, payload)
 
 	fmt_byte, ok_fmt := reader_read_u8(&r)
 	if !ok_fmt {
-		return .Text, nil, opg.Protocol_Error{
+		return .Text, nil, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "CopyResponse payload too short",
 			byte_offset = 0,
@@ -523,21 +523,21 @@ parse_copy_response :: proc(
 
 	num_cols, ok_num := reader_read_i16(&r)
 	if !ok_num {
-		return .Text, nil, opg.Protocol_Error{
+		return .Text, nil, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "CopyResponse missing column count",
 			byte_offset = r.offset,
 		}
 	}
 	if num_cols < 0 {
-		return .Text, nil, opg.Protocol_Error{
+		return .Text, nil, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid negative column count in CopyResponse",
 			byte_offset = r.offset,
 		}
 	}
 	if int(num_cols) * 2 > reader_remaining(&r) {
-		return .Text, nil, opg.Protocol_Error{
+		return .Text, nil, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "CopyResponse payload too short for column format count",
 			byte_offset = r.offset,
@@ -548,7 +548,7 @@ parse_copy_response :: proc(
 	for i in 0 ..< int(num_cols) {
 		col_fmt, ok_col := reader_read_i16(&r)
 		if !ok_col {
-			return .Text, nil, opg.Protocol_Error{
+			return .Text, nil, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Truncated column format code in CopyResponse",
 				byte_offset = r.offset,
@@ -564,13 +564,13 @@ parse_copy_response :: proc(
 	parse_function_call_response parses a FunctionCallResponse ('V') message payload.
 	Handles NULL result (length == -1) and result byte slice.
 */
-parse_function_call_response :: proc(payload: []byte) -> (msg: Msg_Function_Call_Response, err: opg.Error) {
+parse_function_call_response :: proc(payload: []byte) -> (msg: Msg_Function_Call_Response, err: pgerr.Error) {
 	r: Reader
 	reader_init(&r, payload)
 
 	data_len, ok_len := reader_read_i32(&r)
 	if !ok_len {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "FunctionCallResponse payload too short",
 			byte_offset = 0,
@@ -582,7 +582,7 @@ parse_function_call_response :: proc(payload: []byte) -> (msg: Msg_Function_Call
 		return msg, nil
 	}
 	if data_len < -1 {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid negative result length in FunctionCallResponse",
 			byte_offset = r.offset,
@@ -591,7 +591,7 @@ parse_function_call_response :: proc(payload: []byte) -> (msg: Msg_Function_Call
 
 	data_bytes, ok_data := reader_read_bytes(&r, int(data_len))
 	if !ok_data {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Truncated result data in FunctionCallResponse",
 			byte_offset = r.offset,
@@ -612,7 +612,7 @@ parse_negotiate_protocol_version :: proc(
 	allocator := context.temp_allocator,
 ) -> (
 	msg: Msg_Negotiate_Protocol_Version,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	r: Reader
 	reader_init(&r, payload)
@@ -620,21 +620,21 @@ parse_negotiate_protocol_version :: proc(
 	minor_ver, ok_ver := reader_read_i32(&r)
 	num_opts, ok_opts := reader_read_i32(&r)
 	if !ok_ver || !ok_opts {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "NegotiateProtocolVersion header too short",
 			byte_offset = r.offset,
 		}
 	}
 	if num_opts < 0 {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "Invalid negative options count in NegotiateProtocolVersion",
 			byte_offset = r.offset,
 		}
 	}
 	if int(num_opts) > reader_remaining(&r) {
-		return {}, opg.Protocol_Error{
+		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "NegotiateProtocolVersion payload too short for options count",
 			byte_offset = r.offset,
@@ -645,7 +645,7 @@ parse_negotiate_protocol_version :: proc(
 	for i in 0 ..< int(num_opts) {
 		opt_str, ok_str := reader_read_string_nt(&r)
 		if !ok_str {
-			return {}, opg.Protocol_Error{
+			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Unterminated option string in NegotiateProtocolVersion",
 				byte_offset = r.offset,
@@ -674,7 +674,7 @@ parse_negotiate_protocol_version :: proc(
 	  NEVER use raw transmute on numeric wire bytes.
 	- Rule 3 (Strict Allocator Boundaries): All dynamically allocated fields (strings, slices)
 	  MUST use `allocator` which defaults to `context.temp_allocator`. Zero-copy views for strings where applicable.
-	- Rule 4 (Tagged Union Error Handling): Returns `opg.Error` on parse/protocol failures.
+	- Rule 4 (Tagged Union Error Handling): Returns `pgerr.Error` on parse/protocol failures.
 */
 parse_message :: proc(
 	data: []byte,
@@ -682,13 +682,13 @@ parse_message :: proc(
 ) -> (
 	msg: Backend_Message,
 	bytes_consumed: int,
-	err: opg.Error,
+	err: pgerr.Error,
 ) {
 	// A standard Postgres backend packet starts with:
 	// - 1 byte: Message type identifier (e.g. 'R', 'Z', 'D', 'T', 'E')
 	// - 4 bytes: Big-Endian i32 packet length (includes the 4 length bytes, but NOT the 1 identifier byte)
 	if len(data) < 5 {
-		return nil, 0, opg.Protocol_Error{
+		return nil, 0, pgerr.Protocol_Error{
 			type = .Buffer_Underflow,
 			message = "Header requires at least 5 bytes",
 			byte_offset = 0,
@@ -700,7 +700,7 @@ parse_message :: proc(
 	// Explicit Big-Endian conversion using core:encoding/endian
 	payload_len_i32, ok := endian.get_i32(data[1:5], .Big)
 	if !ok || payload_len_i32 < 4 {
-		return nil, 0, opg.Protocol_Error{
+		return nil, 0, pgerr.Protocol_Error{
 			type = .Invalid_Length,
 			message = "Invalid message length in packet header",
 			byte_offset = 1,
@@ -709,7 +709,7 @@ parse_message :: proc(
 
 	total_msg_len := 1 + int(payload_len_i32)
 	if len(data) < total_msg_len {
-		return nil, 0, opg.Protocol_Error{
+		return nil, 0, pgerr.Protocol_Error{
 			type = .Buffer_Underflow,
 			message = "Incomplete packet payload received",
 			byte_offset = len(data),
@@ -809,7 +809,7 @@ parse_message :: proc(
 		return npv, total_msg_len, nil
 	}
 
-	return nil, 0, opg.Protocol_Error{
+	return nil, 0, pgerr.Protocol_Error{
 		type = .Unknown_Message_Type,
 		message = "Unrecognized backend message identifier",
 		byte_offset = 0,

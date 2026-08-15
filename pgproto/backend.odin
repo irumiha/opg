@@ -1,6 +1,6 @@
 package pgproto
 
-import ".." // opg
+import "../pgerr"
 
 // ----------------------------------------------------------------------------
 // PostgreSQL Backend Message Identifiers (Protocol 3.0)
@@ -121,7 +121,7 @@ Msg_Data_Row :: struct {
 // ----------------------------------------------------------------------------
 
 Msg_Notice_Response :: struct {
-	error: opg.Postgres_Error,
+	error: pgerr.Postgres_Error,
 }
 
 Msg_Notification_Response :: struct {
@@ -215,5 +215,5 @@ Backend_Message :: union {
 	Msg_Portal_Suspended,
 	Msg_Ready_For_Query,
 	Msg_Row_Description,
-	opg.Postgres_Error,
+	pgerr.Postgres_Error,
 }

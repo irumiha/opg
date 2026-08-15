@@ -300,6 +300,92 @@ parse_data_row :: proc(
 	return msg, nil
 }
 
+/*
+	parse_error_or_notice_fields parses structured error/notice fields from ErrorResponse ('E')
+	or NoticeResponse ('N') message payloads.
+	Extracts zero-copy string fields for codes 'S', 'V', 'C', 'M', 'D', 'H', 'P', 'p', 'q',
+	'W', 's', 't', 'c', 'd', 'n', 'F', 'L', 'R'.
+	Unknown field codes are quietly ignored per PostgreSQL 3.0 protocol specification.
+*/
+parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: opg.Postgres_Error, err: opg.Error) {
+	if len(payload) == 0 {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Error/Notice payload is empty",
+			byte_offset = 0,
+		}
+	}
+
+	r: Reader
+	reader_init(&r, payload)
+
+	for {
+		code_byte, ok := reader_read_u8(&r)
+		if !ok {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Error/Notice packet missing terminating null byte",
+				byte_offset = r.offset,
+			}
+		}
+
+		if code_byte == 0x00 {
+			// Terminating null byte reached
+			return pg_err, nil
+		}
+
+		str_val, str_ok := reader_read_string_nt(&r)
+		if !str_ok {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Unterminated string in Error/Notice field",
+				byte_offset = r.offset,
+			}
+		}
+
+		switch code_byte {
+		case 'S':
+			pg_err.severity = str_val
+		case 'V':
+			pg_err.severity = str_val
+		case 'C':
+			pg_err.code = str_val
+		case 'M':
+			pg_err.message = str_val
+		case 'D':
+			pg_err.detail = str_val
+		case 'H':
+			pg_err.hint = str_val
+		case 'P':
+			pg_err.position = str_val
+		case 'p':
+			pg_err.internal_position = str_val
+		case 'q':
+			pg_err.internal_query = str_val
+		case 'W':
+			pg_err.where_context = str_val
+		case 's':
+			pg_err.schema_name = str_val
+		case 't':
+			pg_err.table_name = str_val
+		case 'c':
+			pg_err.column_name = str_val
+		case 'd':
+			pg_err.data_type_name = str_val
+		case 'n':
+			pg_err.constraint_name = str_val
+		case 'F':
+			pg_err.file = str_val
+		case 'L':
+			pg_err.line = str_val
+		case 'R':
+			pg_err.routine = str_val
+		case:
+			// Quietly ignore unrecognized field codes per Protocol 3.0 spec
+		}
+	}
+}
+
 // ----------------------------------------------------------------------------
 // Main Message Parser
 // ----------------------------------------------------------------------------
@@ -391,9 +477,15 @@ parse_message :: proc(
 	case .Empty_Query_Response:
 		return Msg_Empty_Query_Response{}, total_msg_len, nil
 
-	case .Error_Response,
-	     .Notice_Response,
-	     .Bind_Complete,
+	case .Error_Response:
+		err_resp := parse_error_or_notice_fields(payload) or_return
+		return err_resp, total_msg_len, nil
+
+	case .Notice_Response:
+		notice_err := parse_error_or_notice_fields(payload) or_return
+		return Msg_Notice_Response{error = notice_err}, total_msg_len, nil
+
+	case .Bind_Complete,
 	     .Close_Complete,
 	     .Copy_Data,
 	     .Copy_Done,

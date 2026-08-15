@@ -17,6 +17,10 @@ services:
       - "127.0.0.1::5432"
     tmpfs:
       - /var/lib/postgresql/data
+    volumes:
+      # Creates the opg_clear (cleartext) and opg_md5 (md5) auth-scenario
+      # users and their pg_hba rules at initdb time.
+      - ./scripts/pg-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U opg -d opg_test"]
       interval: 1s

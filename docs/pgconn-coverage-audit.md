@@ -7,14 +7,14 @@ run against `Mock_Transport` (no network); integration tests
 (`-define:OPG_INTEGRATION=true`) run against live PostgreSQL 17 via the
 docker compose harness.
 
-Test counts at audit time: 95 unit + 21 integration = 116 (`odin test pgconn -define:OPG_INTEGRATION=true`).
+Test counts at audit time: 95 unit + 23 integration = 118 (`odin test pgconn -define:OPG_INTEGRATION=true`).
 
 ## conn.odin
 
 | Proc / behavior | Unit tests | Integration tests |
 |---|---|---|
 | `conn_is_alive` (all statuses, nil) | `test_conn_is_alive_all_statuses` | exercised by every integration test |
-| `conn_handshake` cleartext / md5 / SCRAM success | `test_conn_handshake_cleartext_success`, `test_conn_handshake_md5_success`, `test_conn_handshake_scram_and_parameters` | `test_integration_connect_and_close` (real SCRAM) |
+| `conn_handshake` cleartext / md5 / SCRAM success | `test_conn_handshake_cleartext_success`, `test_conn_handshake_md5_success`, `test_conn_handshake_scram_and_parameters` | `test_integration_connect_and_close` (real SCRAM), `test_integration_auth_cleartext_password`, `test_integration_auth_md5_password` (wire method pinned via `system_user`) |
 | `conn_handshake` params, backend keys, notices during startup | `test_conn_handshake_with_params_backend_keys_and_notices` | `test_integration_server_parameters_and_appname` |
 | `conn_handshake` server ErrorResponse | `test_conn_handshake_error_response`, `test_conn_handshake_server_error_response` | `test_integration_auth_wrong_password` (28P01), `test_integration_unknown_database` (3D000) |
 | `conn_handshake` SCRAM signature mismatch | `test_conn_handshake_scram_server_signature_mismatch` | — (requires hostile server) |
@@ -93,15 +93,13 @@ Test counts at audit time: 95 unit + 21 integration = 116 (`odin test pgconn -de
 
 | Proc / behavior | Unit tests | Integration tests |
 |---|---|---|
-| `auth_handle_challenge` cleartext / md5 / ok | `test_auth_handle_challenge_cleartext`, `test_auth_handle_challenge_md5`, `test_auth_handle_challenge_ok` | — (server uses SCRAM) |
+| `auth_handle_challenge` cleartext / md5 / ok | `test_auth_handle_challenge_cleartext`, `test_auth_handle_challenge_md5`, `test_auth_handle_challenge_ok` | `test_integration_auth_cleartext_password` (`password` hba rule), `test_integration_auth_md5_password` (`md5` hba rule, md5-stored secret) — incl. 28P01 wrong-password on each |
 | SASL full conversation / errors / unsupported | `test_auth_handle_challenge_sasl_full_conversation`, `test_auth_handle_challenge_sasl_errors`, `test_auth_handle_challenge_unsupported_and_unrecognized` | every integration connect (real SCRAM-SHA-256) |
 | SCRAM primitives (RFC 7677 vectors, nonce, escaping, state lifecycle) | `test_auth_scram_*` (7 tests), `test_auth_md5_password_computation` | every integration connect |
 
 ## Intentionally uncovered
 
 - **TLS negotiation** — deferred with OPG-205 (not implemented).
-- **MD5 auth against a live server** — compose server enforces SCRAM (PG17
-  default); md5 is fully covered at unit level with golden vectors.
 - **SCRAM server-signature forgery live** — requires a hostile server;
   covered at unit level.
 - **`tcp_set_deadlines` OS-level socket timeouts** — currently stores values

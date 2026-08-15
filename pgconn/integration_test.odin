@@ -323,6 +323,59 @@ when OPG_INTEGRATION {
 		}
 	}
 
+	/*
+		integration_auth_scenario connects as a user whose pg_hba rule forces
+		a specific auth method, then pins the actual wire method via
+		PostgreSQL's system_user ('auth_method:user_name', PG16+) so a silent
+		SCRAM fallback cannot fake a pass.
+	*/
+	integration_auth_scenario :: proc(t: ^testing.T, user: string, expected_system_user: string) {
+		cfg := integration_conn_config(t)
+		cfg.user = user
+		cfg.password = "opg"
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected %s connect success, got %v", user, err)
+		if conn == nil {
+			return
+		}
+		defer integration_disconnect(conn)
+
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		qerr := conn_query(conn, "SELECT system_user;", test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected system_user query success, got %v", qerr)
+		if len(collector.rows) == 1 && len(collector.rows[0]) == 1 {
+			testing.expect_value(t, collector.rows[0][0], expected_system_user)
+		} else {
+			testing.fail_now(t, "expected exactly one row from SELECT system_user")
+		}
+
+		// Wrong password must fail with invalid_password on this method too.
+		bad_cfg := cfg
+		bad_cfg.password = "definitely-wrong"
+		bad_conn, bad_err := conn_connect(bad_cfg, context.allocator)
+		testing.expect(t, bad_conn == nil, "expected nil conn on wrong password")
+		pg_err, ok := bad_err.(pgerr.Postgres_Error)
+		testing.expectf(t, ok, "expected Postgres_Error, got %v", bad_err)
+		if ok {
+			testing.expect_value(t, pg_err.code, "28P01")
+		}
+	}
+
+	@(test)
+	test_integration_auth_cleartext_password :: proc(t: ^testing.T) {
+		integration_auth_scenario(t, "opg_clear", "password:opg_clear")
+	}
+
+	@(test)
+	test_integration_auth_md5_password :: proc(t: ^testing.T) {
+		integration_auth_scenario(t, "opg_md5", "md5:opg_md5")
+	}
+
 	Cancel_State :: struct {
 		conn: ^Conn,
 		err:  pgerr.Error,

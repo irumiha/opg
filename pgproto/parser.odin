@@ -4,127 +4,168 @@ import "core:encoding/endian"
 import ".." // Imports root package for opg.Error types
 
 // ----------------------------------------------------------------------------
-// PostgreSQL Backend Message Identifiers (Protocol 3.0)
+// Sub-Parsers for Handshake & Lifecycle Messages
 // ----------------------------------------------------------------------------
 
-Backend_Message_Type :: enum u8 {
-	Authentication         = 'R',
-	Backend_Key_Data        = 'K',
-	Bind_Complete          = '2',
-	Close_Complete         = '3',
-	Command_Complete       = 'C',
-	Copy_Data              = 'd',
-	Copy_Done              = 'c',
-	Copy_In_Response       = 'G',
-	Copy_Out_Response      = 'H',
-	Copy_Both_Response     = 'W',
-	Data_Row               = 'D',
-	Empty_Query_Response   = 'I',
-	Error_Response         = 'E',
-	Function_Call_Response = 'V',
-	Negotiate_Protocol_Ver = 'v',
-	No_Data                = 'n',
-	Notice_Response        = 'N',
-	Notification_Response  = 'A',
-	Parameter_Description  = 't',
-	Parameter_Status       = 'S',
-	Parse_Complete         = '1',
-	Portal_Suspended       = 's',
-	Ready_For_Query        = 'Z',
-	Row_Description        = 'T',
+/*
+	parse_authentication parses an Authentication ('R') message payload.
+	Extracts auth_type, salt for MD5, mechanism lists for SASL, or data for SASL Continue/Final.
+*/
+parse_authentication :: proc(
+	payload: []byte,
+	allocator := context.temp_allocator,
+) -> (
+	msg: Msg_Authentication,
+	err: opg.Error,
+) {
+	r: Reader
+	reader_init(&r, payload)
+
+	auth_code, ok := reader_read_i32(&r)
+	if !ok {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Authentication payload too short",
+			byte_offset = 0,
+		}
+	}
+
+	auth_type := Auth_Type(auth_code)
+	msg.auth_type = auth_type
+
+	switch auth_type {
+	case .Ok, .Cleartext_Password, .Kerberos_V5, .SCM_Credential, .GSS, .SSPI:
+		return msg, nil
+
+	case .MD5_Password:
+		salt_bytes, salt_ok := reader_read_bytes(&r, 4)
+		if !salt_ok {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "MD5 Authentication missing 4-byte salt",
+				byte_offset = r.offset,
+			}
+		}
+		copy(msg.salt[:], salt_bytes)
+		return msg, nil
+
+	case .SASL:
+		mechs := make([dynamic]string, allocator)
+		for {
+			if reader_remaining(&r) == 0 {
+				break
+			}
+			if r.buf[r.offset] == 0x00 {
+				r.offset += 1
+				break
+			}
+			mech_str, str_ok := reader_read_string_nt(&r)
+			if !str_ok {
+				return {}, opg.Protocol_Error{
+					type = .Malformed_Packet,
+					message = "Unterminated SASL mechanism string",
+					byte_offset = r.offset,
+				}
+			}
+			append(&mechs, mech_str)
+		}
+		msg.mechanisms = mechs[:]
+		return msg, nil
+
+	case .SASL_Continue, .SASL_Final, .GSS_Continue:
+		rem := reader_remaining(&r)
+		rem_bytes, _ := reader_read_bytes(&r, rem)
+		msg.sasl_data = string(rem_bytes)
+		return msg, nil
+	}
+
+	return msg, nil
+}
+
+/*
+	parse_backend_key_data parses a BackendKeyData ('K') message payload (process ID and secret key).
+*/
+parse_backend_key_data :: proc(payload: []byte) -> (msg: Msg_Backend_Key_Data, err: opg.Error) {
+	r: Reader
+	reader_init(&r, payload)
+
+	pid, ok_pid := reader_read_i32(&r)
+	secret, ok_secret := reader_read_i32(&r)
+	if !ok_pid || !ok_secret {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "BackendKeyData payload too short",
+			byte_offset = r.offset,
+		}
+	}
+	return Msg_Backend_Key_Data{process_id = pid, secret_key = secret}, nil
+}
+
+/*
+	parse_parameter_status parses a ParameterStatus ('S') message payload (name and value strings).
+*/
+parse_parameter_status :: proc(payload: []byte) -> (msg: Msg_Parameter_Status, err: opg.Error) {
+	r: Reader
+	reader_init(&r, payload)
+
+	name, ok_name := reader_read_string_nt(&r)
+	value, ok_value := reader_read_string_nt(&r)
+	if !ok_name || !ok_value {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Malformed ParameterStatus payload",
+			byte_offset = r.offset,
+		}
+	}
+	return Msg_Parameter_Status{name = name, value = value}, nil
+}
+
+/*
+	parse_ready_for_query parses a ReadyForQuery ('Z') message payload (transaction status character).
+*/
+parse_ready_for_query :: proc(payload: []byte) -> (msg: Msg_Ready_For_Query, err: opg.Error) {
+	r: Reader
+	reader_init(&r, payload)
+
+	status_byte, ok := reader_read_u8(&r)
+	if !ok {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "ReadyForQuery payload too short",
+			byte_offset = 0,
+		}
+	}
+	status := Transaction_Status(status_byte)
+	if status != .Idle && status != .In_Transaction && status != .Failed_Transaction {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid transaction status in ReadyForQuery",
+			byte_offset = 0,
+		}
+	}
+	return Msg_Ready_For_Query{status = status}, nil
+}
+
+/*
+	parse_command_complete parses a CommandComplete ('C') message payload (tag string).
+*/
+parse_command_complete :: proc(payload: []byte) -> (msg: Msg_Command_Complete, err: opg.Error) {
+	r: Reader
+	reader_init(&r, payload)
+
+	tag, ok := reader_read_string_nt(&r)
+	if !ok {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Malformed CommandComplete payload",
+			byte_offset = 0,
+		}
+	}
+	return Msg_Command_Complete{tag = tag}, nil
 }
 
 // ----------------------------------------------------------------------------
-// Backend Message Payloads
-// ----------------------------------------------------------------------------
-
-Auth_Type :: enum i32 {
-	Ok                = 0,
-	Kerberos_V5       = 2,
-	Cleartext_Password = 3,
-	MD5_Password      = 5,
-	SCM_Credential    = 6,
-	GSS               = 7,
-	GSS_Continue      = 8,
-	SSPI              = 9,
-	SASL              = 10,
-	SASL_Continue     = 11,
-	SASL_Final        = 12,
-}
-
-Msg_Authentication :: struct {
-	auth_type: Auth_Type,
-	salt:      [4]u8,        // Used when auth_type == .MD5_Password
-	mechanisms: []string,    // Used when auth_type == .SASL (allocated in temp_allocator)
-	sasl_data: string,       // Used for SASL_Continue / SASL_Final
-}
-
-Msg_Backend_Key_Data :: struct {
-	process_id: i32,
-	secret_key: i32,
-}
-
-Msg_Command_Complete :: struct {
-	tag: string, // e.g., "SELECT 1", "INSERT 0 1" (allocated in temp_allocator)
-}
-
-Transaction_Status :: enum u8 {
-	Idle               = 'I', // Not in a transaction block
-	In_Transaction     = 'T', // In a transaction block
-	Failed_Transaction = 'E', // In a failed transaction block (queries ignored until ROLLBACK)
-}
-
-Msg_Ready_For_Query :: struct {
-	status: Transaction_Status,
-}
-
-Field_Format :: enum i16 {
-	Text   = 0,
-	Binary = 1,
-}
-
-Field_Description :: struct {
-	name:            string,       // Column name (allocated in temp_allocator)
-	table_oid:       u32,          // If column belongs to table, table's OID, else 0
-	column_attr_num: i16,          // Attribute number of column in table, else 0
-	type_oid:        u32,          // Data type OID
-	type_size:       i16,          // Data type size (negative if variable-length)
-	type_modifier:   i32,          // Type modifier
-	format_code:     Field_Format, // 0 = text, 1 = binary
-}
-
-Msg_Row_Description :: struct {
-	fields: []Field_Description, // Slice allocated in temp_allocator
-}
-
-Column_Value :: struct {
-	is_null: bool,
-	data:    []byte, // Slice into the packet or copied via temp_allocator
-}
-
-Msg_Data_Row :: struct {
-	values: []Column_Value, // Slice allocated in temp_allocator
-}
-
-Msg_Parameter_Status :: struct {
-	name:  string, // e.g., "server_version", "client_encoding"
-	value: string, // e.g., "16.1", "UTF8"
-}
-
-// Tagged union of all possible Backend Messages
-Backend_Message :: union {
-	Msg_Authentication,
-	Msg_Backend_Key_Data,
-	Msg_Command_Complete,
-	Msg_Ready_For_Query,
-	Msg_Row_Description,
-	Msg_Data_Row,
-	Msg_Parameter_Status,
-	opg.Postgres_Error,
-}
-
-// ----------------------------------------------------------------------------
-// Protocol Parser Stub
+// Main Message Parser
 // ----------------------------------------------------------------------------
 
 /*
@@ -133,9 +174,10 @@ Backend_Message :: union {
 	ARCHITECTURAL RULES:
 	- Rule 1 (3-Layer Architecture): pgproto does NO socket or I/O operations. It only transforms []byte.
 	- Rule 2 (Mandatory Big-Endian Byte Swapping): All header and payload integers (lengths, OIDs, counts)
-	  MUST be parsed using `endian.get_i16(..., .Big)`, `endian.get_i32(..., .Big)`, etc. NEVER use raw transmute.
+	  MUST be parsed using `endian.get_i16(..., .Big)`, `endian.get_i32(..., .Big)`, or `Reader` primitives.
+	  NEVER use raw transmute on numeric wire bytes.
 	- Rule 3 (Strict Allocator Boundaries): All dynamically allocated fields (strings, slices)
-	  MUST use `allocator` which defaults to `context.temp_allocator`.
+	  MUST use `allocator` which defaults to `context.temp_allocator`. Zero-copy views for strings where applicable.
 	- Rule 4 (Tagged Union Error Handling): Returns `opg.Error` on parse/protocol failures.
 */
 parse_message :: proc(
@@ -159,7 +201,7 @@ parse_message :: proc(
 
 	msg_type := Backend_Message_Type(data[0])
 
-	// MANDATORY RULE 2: Explicit Big-Endian conversion using core:encoding/endian
+	// Explicit Big-Endian conversion using core:encoding/endian
 	payload_len_i32, ok := endian.get_i32(data[1:5], .Big)
 	if !ok || payload_len_i32 < 4 {
 		return nil, 0, opg.Protocol_Error{
@@ -183,50 +225,29 @@ parse_message :: proc(
 	// Branch on message type and decode payload with temp_allocator and big-endian decoding
 	switch msg_type {
 	case .Ready_For_Query:
-		if len(payload) < 1 {
-			return nil, 0, opg.Protocol_Error{
-				type = .Malformed_Packet,
-				message = "ReadyForQuery payload too short",
-			}
-		}
-		status := Transaction_Status(payload[0])
-		return Msg_Ready_For_Query{status = status}, total_msg_len, nil
+		rfq := parse_ready_for_query(payload) or_return
+		return rfq, total_msg_len, nil
 
 	case .Backend_Key_Data:
-		if len(payload) < 8 {
-			return nil, 0, opg.Protocol_Error{
-				type = .Malformed_Packet,
-				message = "BackendKeyData payload too short",
-			}
-		}
-		pid, _ := endian.get_i32(payload[0:4], .Big)
-		key, _ := endian.get_i32(payload[4:8], .Big)
-		return Msg_Backend_Key_Data{process_id = pid, secret_key = key}, total_msg_len, nil
+		key := parse_backend_key_data(payload) or_return
+		return key, total_msg_len, nil
 
 	case .Authentication:
-		if len(payload) < 4 {
-			return nil, 0, opg.Protocol_Error{
-				type = .Malformed_Packet,
-				message = "Authentication payload too short",
-			}
-		}
-		auth_code, _ := endian.get_i32(payload[0:4], .Big)
-		auth_msg := Msg_Authentication{
-			auth_type = Auth_Type(auth_code),
-		}
-		// Additional SASL / MD5 salt decoding goes here using allocator
-		return auth_msg, total_msg_len, nil
+		auth := parse_authentication(payload, allocator) or_return
+		return auth, total_msg_len, nil
+
+	case .Parameter_Status:
+		param := parse_parameter_status(payload) or_return
+		return param, total_msg_len, nil
 
 	case .Command_Complete:
-		// Null-terminated string tag (allocated via temp_allocator)
-		tag_str := string(payload[:max(0, len(payload)-1)])
-		return Msg_Command_Complete{tag = tag_str}, total_msg_len, nil
+		cc := parse_command_complete(payload) or_return
+		return cc, total_msg_len, nil
 
 	case .Row_Description,
 	     .Data_Row,
 	     .Error_Response,
 	     .Notice_Response,
-	     .Parameter_Status,
 	     .Bind_Complete,
 	     .Close_Complete,
 	     .Copy_Data,
@@ -242,7 +263,7 @@ parse_message :: proc(
 	     .Parameter_Description,
 	     .Parse_Complete,
 	     .Portal_Suspended:
-		// Stubs for remaining backend messages - to be fully implemented with temp_allocator and endian decoding
+		// Stubs for remaining backend messages - implemented in Tasks 2, 3, 4
 		return nil, total_msg_len, nil
 	}
 

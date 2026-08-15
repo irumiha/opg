@@ -1,0 +1,4 @@
+.envrc
+.superpowers/
+build/
+*.bin

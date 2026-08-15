@@ -193,11 +193,18 @@ pool_acquire :: proc(
 }
 
 /*
-	pool_release returns a borrowed connection. Ready connections go back to
-	the idle list; connections in any other state are destroyed (Task 3 adds
-	a ROLLBACK reset for in-transaction states before giving up on them).
-	Releasing a connection the pool does not currently track (including nil
-	or a double release) fails with Foreign_Connection.
+	pool_release returns a borrowed connection to the pool.
+
+	- .Ready conns are pooled immediately (fast path, no I/O).
+	- .In_Transaction / .Failed_Transaction conns are reset with ROLLBACK
+	  outside the lock (the conn is invisible to other threads once removed
+	  from in_use); if the reset fails or does not end .Ready, the conn is
+	  destroyed. pending_resets keeps pool_destroy from freeing the pool
+	  while the reset is in flight.
+	- Any other status (or a closing pool) destroys the connection.
+
+	Releasing a connection the pool does not track (nil, foreign, or double
+	release) fails with Foreign_Connection.
 */
 pool_release :: proc(
 	pool: ^Pool,
@@ -224,7 +231,27 @@ pool_release :: proc(
 		return pgerr.Pool_Error{type = .Foreign_Connection, message = "connection does not belong to this pool"}
 	}
 
+	// Fast path: healthy idle connection, no reset I/O required.
 	if conn.status == .Ready && !pool.is_closed {
+		conn.last_active = time.now()
+		append(&pool.available, conn)
+		sync.cond_broadcast(&pool.cond)
+		sync.mutex_unlock(&pool.mutex)
+		return nil
+	}
+
+	needs_reset := !pool.is_closed && (conn.status == .In_Transaction || conn.status == .Failed_Transaction)
+	healthy := false
+	if needs_reset {
+		pool.pending_resets += 1
+		sync.mutex_unlock(&pool.mutex)
+		reset_err := conn_query(conn, "ROLLBACK")
+		healthy = reset_err == nil && conn.status == .Ready
+		sync.mutex_lock(&pool.mutex)
+		pool.pending_resets -= 1
+	}
+
+	if healthy && !pool.is_closed {
 		conn.last_active = time.now()
 		append(&pool.available, conn)
 	} else {

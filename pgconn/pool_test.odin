@@ -319,3 +319,171 @@ test_pool_acquire_nil_pool :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "expected Pool_Error")
 	testing.expect_value(t, perr.type, pgerr.Pool_Error_Type.Pool_Closed)
 }
+
+// ----------------------------------------------------------------------------
+// pool_release reset & destruction paths
+// ----------------------------------------------------------------------------
+
+@(test)
+test_pool_release_resets_in_transaction :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 1, 1))
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+
+	// Simulate a query that left an open transaction, with the mock server
+	// ready to answer the pool's ROLLBACK:
+	//   CommandComplete "ROLLBACK" + ReadyForQuery 'I'
+	c1.status = .In_Transaction
+	rollback_complete := []byte{'C', 0, 0, 0, 13, 'R', 'O', 'L', 'L', 'B', 'A', 'C', 'K', 0}
+	rfq_idle := []byte{'Z', 0, 0, 0, 5, 'I'}
+	append(&dialer.transports[0].read_chunks, rollback_complete)
+	append(&dialer.transports[0].read_chunks, rfq_idle)
+
+	testing.expect(t, pool_release(pool, c1) == nil, "expected release success")
+
+	// The pool must have sent a simple query ('Q') containing ROLLBACK.
+	written := dialer.transports[0].written_bytes
+	testing.expect(t, len(written) > 0 && written[0] == 'Q', "expected simple query sent on release")
+
+	// Connection was reset and pooled, not destroyed.
+	testing.expect_value(t, len(pool.available), 1)
+	testing.expect_value(t, pool.pending_resets, 0)
+
+	c2, err2 := pool_acquire(pool)
+	testing.expect(t, err2 == nil, "expected re-acquire success")
+	testing.expect(t, c2 == c1, "expected same connection back after reset")
+	testing.expect_value(t, c2.status, Conn_Status.Ready)
+	testing.expect(t, pool_release(pool, c2) == nil, "expected release success")
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_release_destroys_on_failed_reset :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 1, 1))
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+
+	// Open transaction but the socket delivers nothing: ROLLBACK read fails
+	// with Socket_Closed, so the pool must destroy the connection.
+	c1.status = .In_Transaction
+
+	testing.expect(t, pool_release(pool, c1) == nil, "expected release to succeed even when conn is destroyed")
+	testing.expect_value(t, len(pool.available), 0)
+	testing.expect_value(t, len(pool.in_use), 0)
+	testing.expect_value(t, pool.pending_resets, 0)
+	testing.expect(t, dialer.transports[0].is_closed, "expected broken conn closed")
+
+	// Slot was freed: a fresh acquire dials a new connection.
+	c2, err2 := pool_acquire(pool)
+	testing.expect(t, err2 == nil, "expected acquire success after destroy")
+	testing.expect_value(t, dialer.dial_count, 2)
+	testing.expect(t, pool_release(pool, c2) == nil, "expected release success")
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_release_foreign_connection :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 0, 2))
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	// A connection the pool never dialed.
+	foreign_mock: Mock_Transport
+	mock_transport_init(&foreign_mock)
+	outsider := new(Conn, context.allocator)
+	outsider.allocator = context.allocator
+	outsider.status = .Ready
+	stream_init(&outsider.stream, make_mock_transport(&foreign_mock), allocator = context.allocator)
+
+	rerr := pool_release(pool, outsider)
+	perr, ok := rerr.(pgerr.Pool_Error)
+	testing.expect(t, ok, "expected Pool_Error")
+	testing.expect_value(t, perr.type, pgerr.Pool_Error_Type.Foreign_Connection)
+	testing.expect_value(t, len(pool.available), 0)
+
+	// nil connection
+	rerr2 := pool_release(pool, nil)
+	perr2, ok2 := rerr2.(pgerr.Pool_Error)
+	testing.expect(t, ok2, "expected Pool_Error")
+	testing.expect_value(t, perr2.type, pgerr.Pool_Error_Type.Foreign_Connection)
+
+	// Double release
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+	testing.expect(t, pool_release(pool, c1) == nil, "expected first release success")
+	rerr3 := pool_release(pool, c1)
+	perr3, ok3 := rerr3.(pgerr.Pool_Error)
+	testing.expect(t, ok3, "expected Pool_Error on double release")
+	testing.expect_value(t, perr3.type, pgerr.Pool_Error_Type.Foreign_Connection)
+
+	conn_close(outsider)
+	free(outsider, context.allocator)
+	mock_transport_destroy(&foreign_mock)
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_pool_release_destroys_dead_conn :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 0, 1))
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+
+	// Simulate a detected socket drop: no reset attempted, conn destroyed.
+	c1.status = .Disconnected
+
+	testing.expect(t, pool_release(pool, c1) == nil, "expected release success")
+	testing.expect_value(t, len(pool.available), 0)
+	testing.expect_value(t, len(pool.in_use), 0)
+	// No ROLLBACK was attempted on a dead conn.
+	testing.expect_value(t, len(dialer.transports[0].written_bytes), 0)
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

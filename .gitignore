@@ -2,3 +2,4 @@
 .superpowers/
 build/
 *.bin
+!pgproto/tests_golden_files/*.bin

@@ -90,10 +90,29 @@ Postgres_Error :: struct {
 	routine:              string, // 'R' Source routine name in PostgreSQL engine
 }
 
+Pool_Error_Type :: enum {
+	None,
+	Invalid_Config,
+	Pool_Closed,
+	Acquire_Timeout,
+	Foreign_Connection,
+}
+
+/*
+	Pool_Error reports connection pool lifecycle and usage failures.
+	`message` is always a static string literal — it is never allocated
+	and must never be freed.
+*/
+Pool_Error :: struct {
+	type:    Pool_Error_Type,
+	message: string,
+}
+
 // Master tagged union for all driver errors
 Error :: union {
 	Net_Error,
 	Protocol_Error,
 	Auth_Error,
 	Postgres_Error,
+	Pool_Error,
 }

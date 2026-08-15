@@ -1,5 +1,6 @@
 package pgconn
 
+import "core:encoding/endian"
 import "core:mem"
 import "core:net"
 import "core:testing"
@@ -779,6 +780,133 @@ test_stream_write_messages_pipelined :: proc(t: ^testing.T) {
 		closed_net_err, is_closed_net := err_closed.(pgerr.Net_Error)
 		testing.expect(t, is_closed_net)
 		testing.expect_value(t, closed_net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_timeout_error :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		mock.simulate_timeout = true
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		net_err, ok := err.(pgerr.Net_Error)
+		testing.expect(t, ok, "expected Net_Error")
+		testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Timeout)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_eof_closed_error :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		mock.simulate_eof = true
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		net_err, ok := err.(pgerr.Net_Error)
+		testing.expect(t, ok, "expected Net_Error")
+		testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_read_invalid_length_error :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Header with length 2 (< 4 minimum)
+		append(&mock.read_chunks, []byte{'Z', 0, 0, 0, 2})
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		_, err := stream_read_message(&stream)
+		proto_err, ok := err.(pgerr.Protocol_Error)
+		testing.expect(t, ok, "expected Protocol_Error")
+		testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Invalid_Length)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_stream_large_packet_buffer_expansion :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		// Create a large CommandComplete message: 'C', length 4 + 5000 bytes string + 1 null byte
+		large_payload := make([]byte, 5000, context.temp_allocator)
+		for i in 0 ..< 5000 {
+			large_payload[i] = 'A'
+		}
+
+		builder := make([dynamic]byte, context.temp_allocator)
+		append(&builder, 'C')
+		len_pos := len(builder)
+		append(&builder, 0, 0, 0, 0)
+		append(&builder, ..large_payload)
+		append(&builder, 0)
+		total_len := i32(len(builder) - 1)
+		endian.put_i32(builder[len_pos : len_pos + 4], .Big, total_len)
+
+		append(&mock.read_chunks, builder[:])
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		// Initialize with small initial capacity (128) to test dynamic expansion
+		stream_init(&stream, transport, initial_capacity = 128)
+		defer stream_destroy(&stream)
+
+		msg, err := stream_read_message(&stream)
+		testing.expect(t, err == nil, "expected successful parse of large message")
+		cc, ok := msg.(pgproto.Msg_Command_Complete)
+		testing.expect(t, ok, "expected CommandComplete")
+		testing.expect_value(t, len(cc.tag), 5000)
 	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)

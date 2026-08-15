@@ -280,6 +280,7 @@ when OPG_INTEGRATION {
 		testing.expectf(t, ok, "expected Postgres_Error, got %v", err)
 		if ok {
 			testing.expect_value(t, pg_err.code, "28P01") // invalid_password
+			pgerr.postgres_error_destroy(pg_err, context.allocator)
 		}
 	}
 
@@ -294,6 +295,7 @@ when OPG_INTEGRATION {
 		testing.expectf(t, ok, "expected Postgres_Error, got %v", err)
 		if ok {
 			testing.expect_value(t, pg_err.code, "3D000") // invalid_catalog_name
+			pgerr.postgres_error_destroy(pg_err, context.allocator)
 		}
 	}
 
@@ -363,6 +365,7 @@ when OPG_INTEGRATION {
 		testing.expectf(t, ok, "expected Postgres_Error, got %v", bad_err)
 		if ok {
 			testing.expect_value(t, pg_err.code, "28P01")
+			pgerr.postgres_error_destroy(pg_err, context.allocator)
 		}
 	}
 

@@ -22,6 +22,12 @@ extract_rows_affected :: proc(tag: string) -> i64 {
 /*
 	conn_query executes a SQL query string using PostgreSQL Simple Query protocol ('Q').
 	Streams rows, command completion tags, and descriptors to provided callbacks.
+
+	MEMORY LIFETIME:
+	If the server returns a Postgres_Error, its string fields are cloned into
+	`context.temp_allocator` to survive the query execution loop. Callers wishing
+	to retain the error beyond the current frame/temp-arena cycle must clone it
+	using `pgerr.postgres_error_clone(err.(pgerr.Postgres_Error), allocator)`.
 */
 conn_query :: proc(
 	conn: ^Conn,

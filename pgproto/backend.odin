@@ -82,6 +82,10 @@ parameter_status_clone :: proc(
 	res: Msg_Parameter_Status,
 	err: mem.Allocator_Error,
 ) {
+	defer if err != nil {
+		delete(res.name, allocator)
+		res = {}
+	}
 	res.name = strings.clone(msg.name, allocator) or_return
 	res.value = strings.clone(msg.value, allocator) or_return
 	return res, nil

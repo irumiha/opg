@@ -270,7 +270,6 @@ test_auth_scram_verify_server_final_rfc7677 :: proc(t: ^testing.T) {
 		#partial switch e in err_res {
 		case pgerr.Auth_Error:
 			testing.expect_value(t, e.type, pgerr.Auth_Error_Type.Authentication_Failed)
-			delete(e.message, state.allocator)
 		case:
 			testing.expect(t, false, "expected Auth_Error")
 		}

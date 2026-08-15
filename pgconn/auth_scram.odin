@@ -281,7 +281,6 @@ scram_verify_server_final :: proc(
 	server_final_msg: string,
 	allocator := context.temp_allocator,
 ) -> pgerr.Error {
-	state_alloc := state != nil && state.allocator.procedure != nil ? state.allocator : context.allocator
 	parts := strings.split(server_final_msg, ",", context.temp_allocator)
 	var_v_b64 := ""
 
@@ -291,7 +290,7 @@ scram_verify_server_final :: proc(
 		} else if len(part) >= 2 && part[0] == 'e' && part[1] == '=' {
 			return pgerr.Auth_Error{
 				type = .Authentication_Failed,
-				message = strings.clone(part[2:], state_alloc),
+				message = "Server returned error in SCRAM SASLFinal message",
 			}
 		}
 	}

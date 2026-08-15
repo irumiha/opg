@@ -37,8 +37,12 @@ map_row_to_struct :: proc(
 		}
 	}
 
-	// Iterate over struct fields via core:reflect
-	for field in reflect.struct_fields_zipped(T) {
+	// Zero-allocation field iteration via reflect.struct_field_count / struct_field_at
+	field_count := reflect.struct_field_count(T)
+
+	for i in 0 ..< field_count {
+		field := reflect.struct_field_at(T, i)
+
 		// 1. Determine target column name (check struct tag `db:"..."` first, fallback to field name)
 		col_name := field.name
 		if db_tag, has_tag := reflect.struct_tag_lookup(field.tag, "db"); has_tag {
@@ -55,7 +59,7 @@ map_row_to_struct :: proc(
 		}
 
 		if col_idx < 0 || col_idx >= len(row.values) {
-			continue // Skip unmapped fields or handle missing columns
+			continue // Skip unmapped fields
 		}
 
 		col_val := row.values[col_idx]
@@ -71,7 +75,7 @@ map_row_to_struct :: proc(
 
 		#partial switch variant in field_ti.variant {
 		case reflect.Type_Info_String:
-			// Copy string slice into temp_allocator
+			// Copy string slice into allocator
 			str_val, clone_err := strings.clone_from_bytes(col_val.data, allocator)
 			if clone_err != .None {
 				return result, pgerr.Protocol_Error{
@@ -115,7 +119,7 @@ map_row_to_struct :: proc(
 
 /*
 	map_rows_to_slice maps an array of PostgreSQL DataRows into a slice of Odin structs.
-	Allocates the returned slice and all nested strings using `context.temp_allocator`.
+	Allocates the returned slice and all nested strings using `allocator` (defaults to `context.temp_allocator`).
 */
 map_rows_to_slice :: proc(
 	$T: typeid,
@@ -127,6 +131,9 @@ map_rows_to_slice :: proc(
 	err: pgerr.Error,
 ) where intrinsics.type_is_struct(T) {
 	out := make([]T, len(rows), allocator)
+	defer if err != nil {
+		delete(out, allocator)
+	}
 	for row, i in rows {
 		item, map_err := map_row_to_struct(T, desc, row, allocator)
 		if map_err != nil {

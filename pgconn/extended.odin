@@ -14,6 +14,12 @@ Prepared_Statement :: struct {
 /*
 	conn_exec_params executes an ad-hoc parameterized query using unnamed statement ("")
 	and unnamed portal ("") via a single pipelined write: Parse + Bind + Describe + Execute + Sync.
+
+	MEMORY LIFETIME:
+	If the server returns a Postgres_Error, its string fields are cloned into
+	`context.temp_allocator` to survive the execution loop. Callers wishing
+	to retain the error beyond the current frame/temp-arena cycle must clone it
+	using `pgerr.postgres_error_clone(err.(pgerr.Postgres_Error), allocator)`.
 */
 conn_exec_params :: proc(
 	conn: ^Conn,

@@ -47,6 +47,7 @@ Pool :: struct {
 	in_use:         [dynamic]^Conn,
 	pending_dials:  int,
 	pending_resets: int,
+	waiters:        int,
 	is_closed:      bool,
 }
 
@@ -150,7 +151,9 @@ pool_acquire :: proc(
 			c := pop(&pool.available)
 			stale := pool.config.idle_timeout > 0 && time.since(c.last_active) > pool.config.idle_timeout
 			if !conn_is_alive(c) || stale {
+				sync.mutex_unlock(&pool.mutex)
 				pool_destroy_conn(pool, c)
+				sync.mutex_lock(&pool.mutex)
 				continue
 			}
 			append(&pool.in_use, c)
@@ -169,7 +172,9 @@ pool_acquire :: proc(
 				return nil, cerr
 			}
 			if pool.is_closed {
+				sync.mutex_unlock(&pool.mutex)
 				pool_destroy_conn(pool, c)
+				sync.mutex_lock(&pool.mutex)
 				sync.cond_broadcast(&pool.cond) // pool_destroy may be draining on pending_dials
 				return nil, pgerr.Pool_Error{type = .Pool_Closed, message = "pool is closed"}
 			}
@@ -178,9 +183,14 @@ pool_acquire :: proc(
 		}
 
 		// 3. At capacity: wait for a release or freed slot.
+		pool.waiters += 1
 		if effective > 0 {
 			remaining := time.diff(time.now(), deadline)
 			if remaining <= 0 {
+				pool.waiters -= 1
+				if pool.is_closed && pool.waiters == 0 {
+					sync.cond_broadcast(&pool.cond)
+				}
 				return nil, pgerr.Pool_Error{type = .Acquire_Timeout, message = "timed out waiting for a pooled connection"}
 			}
 			// Timed-out wait falls through to the loop; the deadline check
@@ -188,6 +198,10 @@ pool_acquire :: proc(
 			_ = sync.cond_wait_with_timeout(&pool.cond, &pool.mutex, remaining)
 		} else {
 			sync.cond_wait(&pool.cond, &pool.mutex)
+		}
+		pool.waiters -= 1
+		if pool.is_closed && pool.waiters == 0 {
+			sync.cond_broadcast(&pool.cond)
 		}
 	}
 }
@@ -251,14 +265,19 @@ pool_release :: proc(
 		pool.pending_resets -= 1
 	}
 
+	to_destroy: ^Conn = nil
 	if healthy && !pool.is_closed {
 		conn.last_active = time.now()
 		append(&pool.available, conn)
 	} else {
-		pool_destroy_conn(pool, conn)
+		to_destroy = conn
 	}
 	sync.cond_broadcast(&pool.cond)
 	sync.mutex_unlock(&pool.mutex)
+
+	if to_destroy != nil {
+		pool_destroy_conn(pool, to_destroy)
+	}
 	return nil
 }
 
@@ -305,7 +324,7 @@ pool_destroy :: proc(pool: ^Pool) {
 	pool.is_closed = true
 	sync.cond_broadcast(&pool.cond)
 
-	for len(pool.in_use) > 0 || pool.pending_dials > 0 || pool.pending_resets > 0 {
+	for len(pool.in_use) > 0 || pool.pending_dials > 0 || pool.pending_resets > 0 || pool.waiters > 0 {
 		sync.cond_wait(&pool.cond, &pool.mutex)
 	}
 

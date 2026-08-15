@@ -260,6 +260,12 @@ encode_bind :: proc(builder: ^[dynamic]byte, msg: Msg_Bind) -> (bytes_written: i
 		if pv.is_null {
 			write_i32(builder, -1)
 		} else {
+			if len(pv.value) > int(max(i32)) {
+				return 0, pgerr.Protocol_Error{
+					type = .Invalid_Length,
+					message = "Parameter value length exceeds maximum 32-bit integer size",
+				}
+			}
 			write_i32(builder, i32(len(pv.value)))
 			write_bytes(builder, pv.value)
 		}

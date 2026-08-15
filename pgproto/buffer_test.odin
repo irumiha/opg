@@ -551,5 +551,58 @@ test_boundary_integers_roundtrip :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_read_string_nt_clone_allocator_failure :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	failing_allocator_proc :: proc(
+		allocator_data: rawptr,
+		mode: mem.Allocator_Mode,
+		size, alignment: int,
+		old_memory: rawptr,
+		old_size: int,
+		location := #caller_location,
+	) -> ([]byte, mem.Allocator_Error) {
+		return nil, .Out_Of_Memory
+	}
+
+	failing_allocator := mem.Allocator{
+		procedure = failing_allocator_proc,
+		data = nil,
+	}
+
+	data := []byte{'h', 'e', 'l', 'l', 'o', 0x00, 'w', 'o', 'r', 'l', 'd', 0x00}
+
+	// Test stateless read_string_nt_clone with failing allocator
+	offset := 0
+	_, ok := read_string_nt_clone(data, &offset, failing_allocator)
+	testing.expect(t, !ok, "read_string_nt_clone should fail with failing_allocator")
+	testing.expect_value(t, offset, 0)
+
+	// Verify reading succeeds with proper allocator and advances offset
+	val, ok_valid := read_string_nt_clone(data, &offset, context.temp_allocator)
+	testing.expect(t, ok_valid, "read_string_nt_clone should succeed with valid allocator")
+	testing.expect_value(t, val, "hello")
+	testing.expect_value(t, offset, 6)
+
+	// Test Reader struct read_string_nt_clone with failing allocator
+	r: Reader
+	reader_init(&r, data)
+	_, ok_r := reader_read_string_nt_clone(&r, failing_allocator)
+	testing.expect(t, !ok_r, "reader_read_string_nt_clone should fail with failing_allocator")
+	testing.expect_value(t, r.offset, 0)
+
+	val_r, ok_r_valid := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, ok_r_valid, "reader_read_string_nt_clone should succeed with valid allocator")
+	testing.expect_value(t, val_r, "hello")
+	testing.expect_value(t, r.offset, 6)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+
 
 

@@ -125,9 +125,11 @@ read_string_nt_clone :: proc(
 	val: string,
 	ok: bool,
 ) {
+	saved_offset := offset^
 	str_slice := read_string_nt(buf, offset) or_return
 	cloned, err := strings.clone(str_slice, allocator)
 	if err != .None {
+		offset^ = saved_offset
 		return "", false
 	}
 	return cloned, true

@@ -478,3 +478,283 @@ test_parse_error_and_notice_edge_cases :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+@(test)
+test_parse_extended_and_copy_messages :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// 1. Completion & Suspended signals
+	sig_1 := []byte{'1', 0, 0, 0, 4}
+	m1, n1, err1 := parse_message(sig_1)
+	testing.expect_value(t, err1, nil)
+	testing.expect_value(t, n1, 5)
+	_, is_pc := m1.(Msg_Parse_Complete); testing.expect(t, is_pc, "expected Msg_Parse_Complete")
+
+	sig_2 := []byte{'2', 0, 0, 0, 4}
+	m2, n2, err2 := parse_message(sig_2)
+	testing.expect_value(t, err2, nil)
+	testing.expect_value(t, n2, 5)
+	_, is_bc := m2.(Msg_Bind_Complete); testing.expect(t, is_bc, "expected Msg_Bind_Complete")
+
+	sig_3 := []byte{'3', 0, 0, 0, 4}
+	m3, n3, err3 := parse_message(sig_3)
+	testing.expect_value(t, err3, nil)
+	testing.expect_value(t, n3, 5)
+	_, is_cc := m3.(Msg_Close_Complete); testing.expect(t, is_cc, "expected Msg_Close_Complete")
+
+	sig_n := []byte{'n', 0, 0, 0, 4}
+	mn, nn, errn := parse_message(sig_n)
+	testing.expect_value(t, errn, nil)
+	testing.expect_value(t, nn, 5)
+	_, is_nd := mn.(Msg_No_Data); testing.expect(t, is_nd, "expected Msg_No_Data")
+
+	sig_s := []byte{'s', 0, 0, 0, 4}
+	ms, ns, errs := parse_message(sig_s)
+	testing.expect_value(t, errs, nil)
+	testing.expect_value(t, ns, 5)
+	_, is_ps := ms.(Msg_Portal_Suspended); testing.expect(t, is_ps, "expected Msg_Portal_Suspended")
+
+	// 2. ParameterDescription ('t') with 2 OIDs (23, 25)
+	pd_pkt := []byte{'t', 0, 0, 0, 14, 0, 2, 0, 0, 0, 23, 0, 0, 0, 25}
+	m_pd, n_pd, err_pd := parse_message(pd_pkt)
+	testing.expect_value(t, err_pd, nil)
+	testing.expect_value(t, n_pd, len(pd_pkt))
+	pd, is_pd := m_pd.(Msg_Parameter_Description)
+	testing.expect(t, is_pd, "expected Msg_Parameter_Description")
+	testing.expect_value(t, len(pd.param_oids), 2)
+	testing.expect_value(t, pd.param_oids[0], u32(23))
+	testing.expect_value(t, pd.param_oids[1], u32(25))
+
+	// 3. NotificationResponse ('A')
+	var_a: [dynamic]byte
+	w: Writer
+	writer_init(&w, &var_a)
+	a_pos := writer_begin_packet(&w, 'A')
+	writer_write_i32(&w, 9999)
+	writer_write_string_nt(&w, "events_channel")
+	writer_write_string_nt(&w, "{\"action\":\"insert\"}")
+	writer_end_packet(&w, a_pos)
+
+	m_a, n_a, err_a := parse_message(var_a[:])
+	testing.expect_value(t, err_a, nil)
+	testing.expect_value(t, n_a, len(var_a))
+	notif, is_notif := m_a.(Msg_Notification_Response)
+	testing.expect(t, is_notif, "expected Msg_Notification_Response")
+	testing.expect_value(t, notif.process_id, i32(9999))
+	testing.expect_value(t, notif.channel, "events_channel")
+	testing.expect_value(t, notif.payload, "{\"action\":\"insert\"}")
+
+	// 4. CopyInResponse ('G'), CopyOutResponse ('H'), CopyBothResponse ('W')
+	var_g: [dynamic]byte
+	writer_init(&w, &var_g)
+	g_pos := writer_begin_packet(&w, 'G')
+	writer_write_u8(&w, 0) // overall format text
+	writer_write_i16(&w, 2)
+	writer_write_i16(&w, 0)
+	writer_write_i16(&w, 1)
+	writer_end_packet(&w, g_pos)
+
+	m_g, n_g, err_g := parse_message(var_g[:])
+	testing.expect_value(t, err_g, nil)
+	testing.expect_value(t, n_g, len(var_g))
+	copy_in, is_ci := m_g.(Msg_Copy_In_Response)
+	testing.expect(t, is_ci, "expected Msg_Copy_In_Response")
+	testing.expect_value(t, copy_in.overall_format, Field_Format.Text)
+	testing.expect_value(t, len(copy_in.column_format_codes), 2)
+	testing.expect_value(t, copy_in.column_format_codes[0], Field_Format.Text)
+	testing.expect_value(t, copy_in.column_format_codes[1], Field_Format.Binary)
+
+	var_h: [dynamic]byte
+	writer_init(&w, &var_h)
+	h_pos := writer_begin_packet(&w, 'H')
+	writer_write_u8(&w, 1) // overall format binary
+	writer_write_i16(&w, 1)
+	writer_write_i16(&w, 1)
+	writer_end_packet(&w, h_pos)
+
+	m_h, n_h, err_h := parse_message(var_h[:])
+	testing.expect_value(t, err_h, nil)
+	testing.expect_value(t, n_h, len(var_h))
+	copy_out, is_co := m_h.(Msg_Copy_Out_Response)
+	testing.expect(t, is_co, "expected Msg_Copy_Out_Response")
+	testing.expect_value(t, copy_out.overall_format, Field_Format.Binary)
+	testing.expect_value(t, len(copy_out.column_format_codes), 1)
+	testing.expect_value(t, copy_out.column_format_codes[0], Field_Format.Binary)
+
+	var_w: [dynamic]byte
+	writer_init(&w, &var_w)
+	w_pos := writer_begin_packet(&w, 'W')
+	writer_write_u8(&w, 0) // overall format text
+	writer_write_i16(&w, 0)
+	writer_end_packet(&w, w_pos)
+
+	m_w, n_w, err_w := parse_message(var_w[:])
+	testing.expect_value(t, err_w, nil)
+	testing.expect_value(t, n_w, len(var_w))
+	copy_both, is_cb := m_w.(Msg_Copy_Both_Response)
+	testing.expect(t, is_cb, "expected Msg_Copy_Both_Response")
+	testing.expect_value(t, copy_both.overall_format, Field_Format.Text)
+	testing.expect_value(t, len(copy_both.column_format_codes), 0)
+
+	// 5. CopyData ('d') and CopyDone ('c')
+	cd_pkt := []byte{'d', 0, 0, 0, 9, 'c', 'o', 'p', 'y', '1'}
+	m_cd, n_cd, err_cd := parse_message(cd_pkt)
+	testing.expect_value(t, err_cd, nil)
+	testing.expect_value(t, n_cd, len(cd_pkt))
+	cd, is_cd := m_cd.(Msg_Copy_Data_Backend)
+	testing.expect(t, is_cd, "expected Msg_Copy_Data_Backend")
+	testing.expect_value(t, string(cd.data), "copy1")
+
+	cdo_pkt := []byte{'c', 0, 0, 0, 4}
+	m_cdo, n_cdo, err_cdo := parse_message(cdo_pkt)
+	testing.expect_value(t, err_cdo, nil)
+	testing.expect_value(t, n_cdo, len(cdo_pkt))
+	_, is_cdo := m_cdo.(Msg_Copy_Done_Backend)
+	testing.expect(t, is_cdo, "expected Msg_Copy_Done_Backend")
+
+	// 6. FunctionCallResponse ('V')
+	fc_pkt := []byte{'V', 0, 0, 0, 12, 0, 0, 0, 4, 't', 'e', 's', 't'}
+	m_fc, n_fc, err_fc := parse_message(fc_pkt)
+	testing.expect_value(t, err_fc, nil)
+	testing.expect_value(t, n_fc, len(fc_pkt))
+	fc, is_fc := m_fc.(Msg_Function_Call_Response)
+	testing.expect(t, is_fc, "expected Msg_Function_Call_Response")
+	testing.expect_value(t, fc.is_null, false)
+	testing.expect_value(t, string(fc.data), "test")
+
+	// FunctionCallResponse with NULL value
+	fc_null_pkt := []byte{'V', 0, 0, 0, 8, 0xFF, 0xFF, 0xFF, 0xFF}
+	m_fcn, n_fcn, err_fcn := parse_message(fc_null_pkt)
+	testing.expect_value(t, err_fcn, nil)
+	testing.expect_value(t, n_fcn, len(fc_null_pkt))
+	fcn, is_fcn := m_fcn.(Msg_Function_Call_Response)
+	testing.expect(t, is_fcn, "expected Msg_Function_Call_Response NULL")
+	testing.expect_value(t, fcn.is_null, true)
+	testing.expect_value(t, len(fcn.data), 0)
+
+	// 7. NegotiateProtocolVersion ('v')
+	var_v: [dynamic]byte
+	writer_init(&w, &var_v)
+	v_pos := writer_begin_packet(&w, 'v')
+	writer_write_i32(&w, 1) // minor version 1
+	writer_write_i32(&w, 2) // 2 unrecognized options
+	writer_write_string_nt(&w, "opt1")
+	writer_write_string_nt(&w, "opt2")
+	writer_end_packet(&w, v_pos)
+
+	m_v, n_v, err_v := parse_message(var_v[:])
+	testing.expect_value(t, err_v, nil)
+	testing.expect_value(t, n_v, len(var_v))
+	npv, is_npv := m_v.(Msg_Negotiate_Protocol_Ver)
+	testing.expect(t, is_npv, "expected Msg_Negotiate_Protocol_Ver")
+	testing.expect_value(t, npv.newest_minor_version, i32(1))
+	testing.expect_value(t, len(npv.unrecognized_options), 2)
+	testing.expect_value(t, npv.unrecognized_options[0], "opt1")
+	testing.expect_value(t, npv.unrecognized_options[1], "opt2")
+
+	delete(var_a)
+	delete(var_g)
+	delete(var_h)
+	delete(var_w)
+	delete(var_v)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_parse_extended_and_copy_edge_cases :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// 1. ParameterDescription edge cases
+	pd_zero := []byte{'t', 0, 0, 0, 6, 0, 0}
+	m_pd0, _, err_pd0 := parse_message(pd_zero)
+	testing.expect_value(t, err_pd0, nil)
+	pd0, is_pd0 := m_pd0.(Msg_Parameter_Description)
+	testing.expect(t, is_pd0, "expected Msg_Parameter_Description")
+	testing.expect_value(t, len(pd0.param_oids), 0)
+
+	// Direct call to parse_parameter_description with negative count
+	bad_pd_payload := []byte{0xFF, 0xFF}
+	_, err_bad_pd := parse_parameter_description(bad_pd_payload)
+	testing.expect(t, err_bad_pd != nil, "expected error on negative param count")
+
+	// Direct call to parse_parameter_description truncated
+	short_pd := []byte{0x00}
+	_, err_short_pd := parse_parameter_description(short_pd)
+	testing.expect(t, err_short_pd != nil, "expected error on short pd payload")
+
+	// Truncated param OID
+	trunc_pd := []byte{'t', 0, 0, 0, 8, 0, 1, 0, 0}
+	_, _, err_trunc_pd := parse_message(trunc_pd)
+	testing.expect(t, err_trunc_pd != nil, "expected error on truncated param OID")
+
+	// 2. NotificationResponse edge cases
+	// Direct call to parse_notification with short payload
+	_, err_short_notif := parse_notification([]byte{0, 0})
+	testing.expect(t, err_short_notif != nil, "expected error on short notification payload")
+
+	// Unterminated channel
+	bad_notif_chan := []byte{'A', 0, 0, 0, 8, 0, 0, 0, 1, 'x'}
+	_, _, err_bnc := parse_message(bad_notif_chan)
+	testing.expect(t, err_bnc != nil, "expected error on unterminated channel")
+
+	// Unterminated payload
+	bad_notif_pl := []byte{'A', 0, 0, 0, 10, 0, 0, 0, 1, 'x', 0, 'y'}
+	_, _, err_bnpl := parse_message(bad_notif_pl)
+	testing.expect(t, err_bnpl != nil, "expected error on unterminated payload")
+
+	// 3. COPY response edge cases
+	// Direct call to parse_copy_response with short payload
+	_, _, err_short_cr := parse_copy_response([]byte{0})
+	testing.expect(t, err_short_cr != nil, "expected error on short copy response payload")
+
+	// Direct call to parse_copy_response with negative column count
+	_, _, err_neg_cols := parse_copy_response([]byte{0, 0xFF, 0xFF})
+	testing.expect(t, err_neg_cols != nil, "expected error on negative col count in copy response")
+
+	// Truncated column format code
+	bad_cr_fmt := []byte{'G', 0, 0, 0, 8, 0, 0, 1, 0}
+	_, _, err_bad_crf := parse_message(bad_cr_fmt)
+	testing.expect(t, err_bad_crf != nil, "expected error on truncated column format code")
+
+	// 4. FunctionCallResponse edge cases
+	// Direct call to parse_message with truncated FunctionCallResponse
+	bad_fc := []byte{'V', 0, 0, 0, 5, 0}
+	_, _, err_bad_fc := parse_message(bad_fc)
+	testing.expect(t, err_bad_fc != nil, "expected error on truncated FunctionCallResponse")
+
+	// col_len < -1
+	bad_fc_len := []byte{'V', 0, 0, 0, 8, 0xFF, 0xFF, 0xFF, 0xFE}
+	_, _, err_bad_fcl := parse_message(bad_fc_len)
+	testing.expect(t, err_bad_fcl != nil, "expected error on fc col_len < -1")
+
+	// Truncated value data
+	bad_fc_data := []byte{'V', 0, 0, 0, 9, 0, 0, 0, 5, 'a'}
+	_, _, err_bad_fcd := parse_message(bad_fc_data)
+	testing.expect(t, err_bad_fcd != nil, "expected error on truncated fc data")
+
+	// 5. NegotiateProtocolVersion edge cases
+	// Direct call to parse_message with truncated NegotiateProtocolVersion
+	bad_npv_hdr := []byte{'v', 0, 0, 0, 6, 0, 0}
+	_, _, err_npv_hdr := parse_message(bad_npv_hdr)
+	testing.expect(t, err_npv_hdr != nil, "expected error on truncated NegotiateProtocolVersion header")
+
+	// Negative unrecognized options count
+	bad_npv_neg := []byte{'v', 0, 0, 0, 12, 0, 0, 0, 1, 0xFF, 0xFF, 0xFF, 0xFF}
+	_, _, err_npv_neg := parse_message(bad_npv_neg)
+	testing.expect(t, err_npv_neg != nil, "expected error on negative options count")
+
+	// Unterminated option string
+	bad_npv_unterm := []byte{'v', 0, 0, 0, 13, 0, 0, 0, 1, 0, 0, 0, 1, 'o'}
+	_, _, err_npv_unterm := parse_message(bad_npv_unterm)
+	testing.expect(t, err_npv_unterm != nil, "expected error on unterminated option string")
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+

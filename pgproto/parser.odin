@@ -386,6 +386,245 @@ parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: opg.Postgres_E
 	}
 }
 
+/*
+	parse_parameter_description parses a ParameterDescription ('t') message payload.
+	Extracts parameter type OIDs into a slice allocated using allocator (defaults to context.temp_allocator).
+*/
+parse_parameter_description :: proc(
+	payload: []byte,
+	allocator := context.temp_allocator,
+) -> (
+	msg: Msg_Parameter_Description,
+	err: opg.Error,
+) {
+	r: Reader
+	reader_init(&r, payload)
+
+	num_params, ok_num := reader_read_i16(&r)
+	if !ok_num {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "ParameterDescription payload too short",
+			byte_offset = 0,
+		}
+	}
+	if num_params < 0 {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid negative parameter count in ParameterDescription",
+			byte_offset = 0,
+		}
+	}
+
+	oids := make([]u32, int(num_params), allocator)
+	for i in 0 ..< int(num_params) {
+		oid, ok_oid := reader_read_u32(&r)
+		if !ok_oid {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Truncated parameter OID in ParameterDescription",
+				byte_offset = r.offset,
+			}
+		}
+		oids[i] = oid
+	}
+
+	msg.param_oids = oids
+	return msg, nil
+}
+
+/*
+	parse_notification parses a NotificationResponse ('A') message payload.
+	Extracts process ID, channel name, and notification payload. Zero-copy string views.
+*/
+parse_notification :: proc(payload: []byte) -> (msg: Msg_Notification_Response, err: opg.Error) {
+	r: Reader
+	reader_init(&r, payload)
+
+	pid, ok_pid := reader_read_i32(&r)
+	if !ok_pid {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "NotificationResponse payload too short",
+			byte_offset = 0,
+		}
+	}
+
+	channel, ok_chan := reader_read_string_nt(&r)
+	if !ok_chan {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Unterminated channel string in NotificationResponse",
+			byte_offset = r.offset,
+		}
+	}
+
+	notif_payload, ok_payload := reader_read_string_nt(&r)
+	if !ok_payload {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Unterminated payload string in NotificationResponse",
+			byte_offset = r.offset,
+		}
+	}
+
+	return Msg_Notification_Response{
+		process_id = pid,
+		channel    = channel,
+		payload    = notif_payload,
+	}, nil
+}
+
+/*
+	parse_copy_response parses CopyInResponse ('G'), CopyOutResponse ('H'), or CopyBothResponse ('W') payload.
+	Returns overall format (Text/Binary) and a slice of column format codes allocated using allocator.
+*/
+parse_copy_response :: proc(
+	payload: []byte,
+	allocator := context.temp_allocator,
+) -> (
+	overall_format: Field_Format,
+	column_format_codes: []Field_Format,
+	err: opg.Error,
+) {
+	r: Reader
+	reader_init(&r, payload)
+
+	fmt_byte, ok_fmt := reader_read_u8(&r)
+	if !ok_fmt {
+		return .Text, nil, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "CopyResponse payload too short",
+			byte_offset = 0,
+		}
+	}
+	overall_format = Field_Format(fmt_byte)
+
+	num_cols, ok_num := reader_read_i16(&r)
+	if !ok_num {
+		return .Text, nil, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "CopyResponse missing column count",
+			byte_offset = r.offset,
+		}
+	}
+	if num_cols < 0 {
+		return .Text, nil, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid negative column count in CopyResponse",
+			byte_offset = r.offset,
+		}
+	}
+
+	col_fmts := make([]Field_Format, int(num_cols), allocator)
+	for i in 0 ..< int(num_cols) {
+		col_fmt, ok_col := reader_read_i16(&r)
+		if !ok_col {
+			return .Text, nil, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Truncated column format code in CopyResponse",
+				byte_offset = r.offset,
+			}
+		}
+		col_fmts[i] = Field_Format(col_fmt)
+	}
+
+	return overall_format, col_fmts, nil
+}
+
+/*
+	parse_function_call_response parses a FunctionCallResponse ('V') message payload.
+	Handles NULL result (length == -1) and result byte slice.
+*/
+parse_function_call_response :: proc(payload: []byte) -> (msg: Msg_Function_Call_Response, err: opg.Error) {
+	r: Reader
+	reader_init(&r, payload)
+
+	data_len, ok_len := reader_read_i32(&r)
+	if !ok_len {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "FunctionCallResponse payload too short",
+			byte_offset = 0,
+		}
+	}
+
+	if data_len == -1 {
+		msg.is_null = true
+		return msg, nil
+	}
+	if data_len < -1 {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid negative result length in FunctionCallResponse",
+			byte_offset = r.offset,
+		}
+	}
+
+	data_bytes, ok_data := reader_read_bytes(&r, int(data_len))
+	if !ok_data {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Truncated result data in FunctionCallResponse",
+			byte_offset = r.offset,
+		}
+	}
+
+	msg.is_null = false
+	msg.data = data_bytes
+	return msg, nil
+}
+
+/*
+	parse_negotiate_protocol_version parses a NegotiateProtocolVersion ('v') message payload.
+	Extracts newest minor version and unrecognized options slice.
+*/
+parse_negotiate_protocol_version :: proc(
+	payload: []byte,
+	allocator := context.temp_allocator,
+) -> (
+	msg: Msg_Negotiate_Protocol_Ver,
+	err: opg.Error,
+) {
+	r: Reader
+	reader_init(&r, payload)
+
+	minor_ver, ok_ver := reader_read_i32(&r)
+	num_opts, ok_opts := reader_read_i32(&r)
+	if !ok_ver || !ok_opts {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "NegotiateProtocolVersion header too short",
+			byte_offset = r.offset,
+		}
+	}
+	if num_opts < 0 {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "Invalid negative options count in NegotiateProtocolVersion",
+			byte_offset = r.offset,
+		}
+	}
+
+	opts := make([]string, int(num_opts), allocator)
+	for i in 0 ..< int(num_opts) {
+		opt_str, ok_str := reader_read_string_nt(&r)
+		if !ok_str {
+			return {}, opg.Protocol_Error{
+				type = .Malformed_Packet,
+				message = "Unterminated option string in NegotiateProtocolVersion",
+				byte_offset = r.offset,
+			}
+		}
+		opts[i] = opt_str
+	}
+
+	return Msg_Negotiate_Protocol_Ver{
+		newest_minor_version = minor_ver,
+		unrecognized_options = opts,
+	}, nil
+}
+
 // ----------------------------------------------------------------------------
 // Main Message Parser
 // ----------------------------------------------------------------------------
@@ -485,22 +724,54 @@ parse_message :: proc(
 		notice_err := parse_error_or_notice_fields(payload) or_return
 		return Msg_Notice_Response{error = notice_err}, total_msg_len, nil
 
-	case .Bind_Complete,
-	     .Close_Complete,
-	     .Copy_Data,
-	     .Copy_Done,
-	     .Copy_In_Response,
-	     .Copy_Out_Response,
-	     .Copy_Both_Response,
-	     .Function_Call_Response,
-	     .Negotiate_Protocol_Ver,
-	     .No_Data,
-	     .Notification_Response,
-	     .Parameter_Description,
-	     .Parse_Complete,
-	     .Portal_Suspended:
-		// Stubs for remaining backend messages - implemented in Tasks 3, 4
-		return nil, total_msg_len, nil
+	case .Parse_Complete:
+		return Msg_Parse_Complete{}, total_msg_len, nil
+
+	case .Bind_Complete:
+		return Msg_Bind_Complete{}, total_msg_len, nil
+
+	case .Close_Complete:
+		return Msg_Close_Complete{}, total_msg_len, nil
+
+	case .No_Data:
+		return Msg_No_Data{}, total_msg_len, nil
+
+	case .Portal_Suspended:
+		return Msg_Portal_Suspended{}, total_msg_len, nil
+
+	case .Parameter_Description:
+		pd := parse_parameter_description(payload, allocator) or_return
+		return pd, total_msg_len, nil
+
+	case .Notification_Response:
+		notif := parse_notification(payload) or_return
+		return notif, total_msg_len, nil
+
+	case .Copy_In_Response:
+		fmt, cols := parse_copy_response(payload, allocator) or_return
+		return Msg_Copy_In_Response{overall_format = fmt, column_format_codes = cols}, total_msg_len, nil
+
+	case .Copy_Out_Response:
+		fmt, cols := parse_copy_response(payload, allocator) or_return
+		return Msg_Copy_Out_Response{overall_format = fmt, column_format_codes = cols}, total_msg_len, nil
+
+	case .Copy_Both_Response:
+		fmt, cols := parse_copy_response(payload, allocator) or_return
+		return Msg_Copy_Both_Response{overall_format = fmt, column_format_codes = cols}, total_msg_len, nil
+
+	case .Copy_Data:
+		return Msg_Copy_Data_Backend{data = payload}, total_msg_len, nil
+
+	case .Copy_Done:
+		return Msg_Copy_Done_Backend{}, total_msg_len, nil
+
+	case .Function_Call_Response:
+		fcr := parse_function_call_response(payload) or_return
+		return fcr, total_msg_len, nil
+
+	case .Negotiate_Protocol_Ver:
+		npv := parse_negotiate_protocol_version(payload, allocator) or_return
+		return npv, total_msg_len, nil
 	}
 
 	return nil, 0, opg.Protocol_Error{
@@ -509,3 +780,4 @@ parse_message :: proc(
 		byte_offset = 0,
 	}
 }
+

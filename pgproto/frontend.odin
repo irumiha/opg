@@ -30,6 +30,13 @@ Msg_SASL_Response :: struct {
 	data: []byte,
 }
 
+Msg_Query :: struct {
+	query: string,
+}
+
+Msg_Terminate :: struct {}
+
+
 encode_ssl_request :: proc(builder: ^[dynamic]byte) -> int {
 	start_len := len(builder)
 	pos := write_packet_header_untyped(builder)
@@ -91,3 +98,19 @@ encode_sasl_response :: proc(builder: ^[dynamic]byte, data: []byte) -> int {
 	finish_packet(builder, pos)
 	return len(builder) - start_len
 }
+
+encode_query :: proc(builder: ^[dynamic]byte, query: string) -> int {
+	start_len := len(builder)
+	pos := write_packet_header(builder, 'Q')
+	write_string_nt(builder, query)
+	finish_packet(builder, pos)
+	return len(builder) - start_len
+}
+
+encode_terminate :: proc(builder: ^[dynamic]byte) -> int {
+	start_len := len(builder)
+	pos := write_packet_header(builder, 'X')
+	finish_packet(builder, pos)
+	return len(builder) - start_len
+}
+

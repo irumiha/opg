@@ -148,3 +148,43 @@ test_encode_handshake_messages :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+@(test)
+test_encode_query_and_terminate :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// 1. Query
+	q_len := encode_query(&buf, "SELECT 1;")
+	testing.expect_value(t, q_len, len(buf))
+	r: Reader
+	reader_init(&r, buf[:])
+	q_type, _ := reader_read_u8(&r)
+	q_pkt_len, _ := reader_read_i32(&r)
+	q_str, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, q_type, u8('Q'))
+	testing.expect_value(t, q_pkt_len, 4 + 10) // 4 + len("SELECT 1;\0")
+	testing.expect_value(t, q_str, "SELECT 1;")
+
+	// 2. Terminate
+	clear(&buf)
+	term_len := encode_terminate(&buf)
+	testing.expect_value(t, term_len, 5)
+	testing.expect_value(t, len(buf), 5)
+	reader_init(&r, buf[:])
+	t_type, _ := reader_read_u8(&r)
+	t_pkt_len, _ := reader_read_i32(&r)
+	testing.expect_value(t, t_type, u8('X'))
+	testing.expect_value(t, t_pkt_len, 4)
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+

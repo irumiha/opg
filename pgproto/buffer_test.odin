@@ -4,7 +4,7 @@ import "core:mem"
 import "core:testing"
 
 @(test)
-test_stateless_readers :: proc(t: ^testing.T) {
+test_reader_sequential_reads :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
@@ -24,111 +24,152 @@ test_stateless_readers :: proc(t: ^testing.T) {
 		0xAA, 0xBB,
 	}
 
-	offset := 0
-	v_u8, ok_u8 := read_u8(data, &offset)
-	testing.expect(t, ok_u8, "read_u8 failed")
+	r: Reader
+	reader_init(&r, data)
+
+	v_u8, ok_u8 := reader_read_u8(&r)
+	testing.expect(t, ok_u8, "reader_read_u8 failed")
 	testing.expect_value(t, v_u8, u8(0x42))
-	testing.expect_value(t, offset, 1)
+	testing.expect_value(t, r.offset, 1)
 
-	v_i16, ok_i16 := read_i16(data, &offset)
-	testing.expect(t, ok_i16, "read_i16 failed")
+	v_i16, ok_i16 := reader_read_i16(&r)
+	testing.expect(t, ok_i16, "reader_read_i16 failed")
 	testing.expect_value(t, v_i16, i16(0x0102))
-	testing.expect_value(t, offset, 3)
+	testing.expect_value(t, r.offset, 3)
 
-	v_u16, ok_u16 := read_u16(data, &offset)
-	testing.expect(t, ok_u16, "read_u16 failed")
+	v_u16, ok_u16 := reader_read_u16(&r)
+	testing.expect(t, ok_u16, "reader_read_u16 failed")
 	testing.expect_value(t, v_u16, u16(0x0304))
-	testing.expect_value(t, offset, 5)
+	testing.expect_value(t, r.offset, 5)
 
-	v_i32, ok_i32 := read_i32(data, &offset)
-	testing.expect(t, ok_i32, "read_i32 failed")
+	v_i32, ok_i32 := reader_read_i32(&r)
+	testing.expect(t, ok_i32, "reader_read_i32 failed")
 	testing.expect_value(t, v_i32, i32(0x05060708))
-	testing.expect_value(t, offset, 9)
+	testing.expect_value(t, r.offset, 9)
 
-	v_u32, ok_u32 := read_u32(data, &offset)
-	testing.expect(t, ok_u32, "read_u32 failed")
+	v_u32, ok_u32 := reader_read_u32(&r)
+	testing.expect(t, ok_u32, "reader_read_u32 failed")
 	testing.expect_value(t, v_u32, u32(0x090A0B0C))
-	testing.expect_value(t, offset, 13)
+	testing.expect_value(t, r.offset, 13)
 
-	v_i64, ok_i64 := read_i64(data, &offset)
-	testing.expect(t, ok_i64, "read_i64 failed")
+	v_i64, ok_i64 := reader_read_i64(&r)
+	testing.expect(t, ok_i64, "reader_read_i64 failed")
 	testing.expect_value(t, v_i64, i64(0x0102030405060708))
-	testing.expect_value(t, offset, 21)
+	testing.expect_value(t, r.offset, 21)
 
-	v_str, ok_str := read_string_nt(data, &offset)
-	testing.expect(t, ok_str, "read_string_nt failed")
+	v_str, ok_str := reader_read_string_nt(&r)
+	testing.expect(t, ok_str, "reader_read_string_nt failed")
 	testing.expect_value(t, v_str, "hello")
-	testing.expect_value(t, offset, 27)
+	testing.expect_value(t, r.offset, 27)
 
-	v_bytes, ok_bytes := read_bytes_counted(data, &offset, 2)
-	testing.expect(t, ok_bytes, "read_bytes_counted failed")
+	v_bytes, ok_bytes := reader_read_bytes(&r, 2)
+	testing.expect(t, ok_bytes, "reader_read_bytes failed")
 	testing.expect_value(t, len(v_bytes), 2)
 	testing.expect_value(t, v_bytes[0], u8(0xAA))
 	testing.expect_value(t, v_bytes[1], u8(0xBB))
-	testing.expect_value(t, offset, 29)
+	testing.expect_value(t, r.offset, 29)
 
-	// Bounds checking tests: offset must not advance on failure
-	saved_offset := offset
-	_, ok_underflow := read_i32(data, &offset)
-	testing.expect(t, !ok_underflow, "read_i32 should have failed on underflow")
-	testing.expect_value(t, offset, saved_offset)
+	// Bounds checking: offset must not advance on failure
+	saved_offset := r.offset
+	_, ok_underflow := reader_read_i32(&r)
+	testing.expect(t, !ok_underflow, "reader_read_i32 should have failed on underflow")
+	testing.expect_value(t, r.offset, saved_offset)
 
-	_, ok_bad_str := read_string_nt(data[saved_offset:], &offset)
-	testing.expect(t, !ok_bad_str, "read_string_nt should have failed without null terminator")
+	_, ok_bad_str := reader_read_string_nt(&r)
+	testing.expect(t, !ok_bad_str, "reader_read_string_nt should have failed at end of buffer")
+	testing.expect_value(t, r.offset, saved_offset)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
 @(test)
-test_stateless_readers_edge_cases :: proc(t: ^testing.T) {
+test_reader_empty_buffer_edge_cases :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
 	empty := []byte{}
-	offset := 0
+	r: Reader
+	reader_init(&r, empty)
 
-	_, ok_u8 := read_u8(empty, &offset)
-	testing.expect(t, !ok_u8, "read_u8 empty")
-	testing.expect_value(t, offset, 0)
+	_, ok_u8 := reader_read_u8(&r)
+	testing.expect(t, !ok_u8, "reader_read_u8 empty")
+	testing.expect_value(t, r.offset, 0)
 
-	_, ok_i16 := read_i16(empty, &offset)
-	testing.expect(t, !ok_i16, "read_i16 empty")
-	testing.expect_value(t, offset, 0)
+	_, ok_i16 := reader_read_i16(&r)
+	testing.expect(t, !ok_i16, "reader_read_i16 empty")
+	testing.expect_value(t, r.offset, 0)
 
-	_, ok_u16 := read_u16(empty, &offset)
-	testing.expect(t, !ok_u16, "read_u16 empty")
-	testing.expect_value(t, offset, 0)
+	_, ok_u16 := reader_read_u16(&r)
+	testing.expect(t, !ok_u16, "reader_read_u16 empty")
+	testing.expect_value(t, r.offset, 0)
 
-	_, ok_u32 := read_u32(empty, &offset)
-	testing.expect(t, !ok_u32, "read_u32 empty")
-	testing.expect_value(t, offset, 0)
+	_, ok_i32 := reader_read_i32(&r)
+	testing.expect(t, !ok_i32, "reader_read_i32 empty")
+	testing.expect_value(t, r.offset, 0)
 
-	_, ok_i64 := read_i64(empty, &offset)
-	testing.expect(t, !ok_i64, "read_i64 empty")
-	testing.expect_value(t, offset, 0)
+	_, ok_u32 := reader_read_u32(&r)
+	testing.expect(t, !ok_u32, "reader_read_u32 empty")
+	testing.expect_value(t, r.offset, 0)
 
-	_, ok_cnt_neg := read_bytes_counted(empty, &offset, -1)
-	testing.expect(t, !ok_cnt_neg, "read_bytes_counted negative")
-	testing.expect_value(t, offset, 0)
+	_, ok_i64 := reader_read_i64(&r)
+	testing.expect(t, !ok_i64, "reader_read_i64 empty")
+	testing.expect_value(t, r.offset, 0)
 
-	_, ok_cnt_overflow := read_bytes_counted(empty, &offset, 5)
-	testing.expect(t, !ok_cnt_overflow, "read_bytes_counted overflow")
-	testing.expect_value(t, offset, 0)
+	_, ok_cnt_neg := reader_read_bytes(&r, -1)
+	testing.expect(t, !ok_cnt_neg, "reader_read_bytes negative count")
+	testing.expect_value(t, r.offset, 0)
 
-	// String clone test
+	_, ok_cnt_overflow := reader_read_bytes(&r, 5)
+	testing.expect(t, !ok_cnt_overflow, "reader_read_bytes overflow")
+	testing.expect_value(t, r.offset, 0)
+
+	_, ok_str := reader_read_string_nt(&r)
+	testing.expect(t, !ok_str, "reader_read_string_nt empty")
+	testing.expect_value(t, r.offset, 0)
+
+	_, ok_str_cl := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, !ok_str_cl, "reader_read_string_nt_clone empty")
+	testing.expect_value(t, r.offset, 0)
+
+	// String clone success and end-of-buffer failure
 	str_data := []byte{'w', 'o', 'r', 'l', 'd', 0x00}
-	str_offset := 0
-	cloned, ok_clone := read_string_nt_clone(str_data, &str_offset, context.temp_allocator)
-	testing.expect(t, ok_clone, "read_string_nt_clone failed")
+	reader_init(&r, str_data)
+	cloned, ok_clone := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, ok_clone, "reader_read_string_nt_clone failed")
 	testing.expect_value(t, cloned, "world")
-	testing.expect_value(t, str_offset, 6)
+	testing.expect_value(t, r.offset, 6)
 
-	_, ok_clone_fail := read_string_nt_clone(str_data, &str_offset, context.temp_allocator)
-	testing.expect(t, !ok_clone_fail, "read_string_nt_clone should fail at end")
+	_, ok_clone_fail := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, !ok_clone_fail, "reader_read_string_nt_clone should fail at end")
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_reader_peek_u8 :: proc(t: ^testing.T) {
+	data := []byte{0xAB, 0xCD}
+	r: Reader
+	reader_init(&r, data)
+
+	v1, ok1 := reader_peek_u8(&r)
+	testing.expect(t, ok1, "peek should succeed")
+	testing.expect_value(t, v1, u8(0xAB))
+	testing.expect_value(t, r.offset, 0) // peek must not advance
+
+	_, _ = reader_read_u8(&r)
+	v2, ok2 := reader_peek_u8(&r)
+	testing.expect(t, ok2, "peek at second byte should succeed")
+	testing.expect_value(t, v2, u8(0xCD))
+
+	_, _ = reader_read_u8(&r)
+	_, ok_eof := reader_peek_u8(&r)
+	testing.expect(t, !ok_eof, "peek at EOF should fail")
+
+	r.offset = -1
+	_, ok_neg := reader_peek_u8(&r)
+	testing.expect(t, !ok_neg, "peek at negative offset should fail")
 }
 
 @(test)
@@ -173,25 +214,26 @@ test_stateless_writers :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(buf), len(expected) + 1)
 	testing.expect_value(t, buf[len(expected)], u8(0x00))
 
-	// Test negative numbers & round-trip with stateless readers
+	// Test negative numbers & round-trip with the Reader
 	clear(&buf)
 	write_i16(&buf, -1)
 	write_i32(&buf, -42)
 	write_i64(&buf, -100_000_000_000)
 
-	offset := 0
-	val_i16, ok_i16 := read_i16(buf[:], &offset)
-	testing.expect(t, ok_i16, "read_i16 failed for negative")
+	r: Reader
+	reader_init(&r, buf[:])
+	val_i16, ok_i16 := reader_read_i16(&r)
+	testing.expect(t, ok_i16, "reader_read_i16 failed for negative")
 	testing.expect_value(t, val_i16, i16(-1))
 
-	val_i32, ok_i32 := read_i32(buf[:], &offset)
-	testing.expect(t, ok_i32, "read_i32 failed for negative")
+	val_i32, ok_i32 := reader_read_i32(&r)
+	testing.expect(t, ok_i32, "reader_read_i32 failed for negative")
 	testing.expect_value(t, val_i32, i32(-42))
 
-	val_i64, ok_i64 := read_i64(buf[:], &offset)
-	testing.expect(t, ok_i64, "read_i64 failed for negative")
+	val_i64, ok_i64 := reader_read_i64(&r)
+	testing.expect(t, ok_i64, "reader_read_i64 failed for negative")
 	testing.expect_value(t, val_i64, i64(-100_000_000_000))
-	testing.expect_value(t, offset, len(buf))
+	testing.expect_value(t, r.offset, len(buf))
 
 	delete(buf)
 	buf = nil
@@ -220,11 +262,14 @@ test_packet_framing :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(buf), 15) // 'Q' + 14 bytes
 	testing.expect_value(t, buf[0], u8('Q'))
 
-	offset := 1
-	decoded_len, _ := read_i32(buf[:], &offset)
+	r: Reader
+	reader_init(&r, buf[:])
+	msg_type, _ := reader_read_u8(&r)
+	testing.expect_value(t, msg_type, u8('Q'))
+	decoded_len, _ := reader_read_i32(&r)
 	testing.expect_value(t, decoded_len, 14)
 
-	query_str, _ := read_string_nt(buf[:], &offset)
+	query_str, _ := reader_read_string_nt(&r)
 	testing.expect_value(t, query_str, "SELECT 1;")
 
 	// Test 2: Untyped packet (StartupMessage)
@@ -238,8 +283,8 @@ test_packet_framing :: proc(t: ^testing.T) {
 	u_pkt_len := finish_packet(&buf, u_len_pos)
 
 	testing.expect_value(t, u_pkt_len, len(buf))
-	u_offset := 0
-	u_decoded_len, _ := read_i32(buf[:], &u_offset)
+	reader_init(&r, buf[:])
+	u_decoded_len, _ := reader_read_i32(&r)
 	testing.expect_value(t, u_decoded_len, i32(u_pkt_len))
 
 	delete(buf)
@@ -249,7 +294,7 @@ test_packet_framing :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_reader_writer_structs :: proc(t: ^testing.T) {
+test_packet_build_and_read_back :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
@@ -257,15 +302,12 @@ test_reader_writer_structs :: proc(t: ^testing.T) {
 
 	buf: [dynamic]byte
 
-	w: Writer
-	writer_init(&w, &buf)
-
-	l_pos := writer_begin_packet(&w, 'P')
-	writer_write_string_nt(&w, "stmt_1")
-	writer_write_string_nt(&w, "SELECT $1::int4;")
-	writer_write_i16(&w, 1)
-	writer_write_u32(&w, 23) // INT4OID
-	writer_end_packet(&w, l_pos)
+	l_pos := write_packet_header(&buf, 'P')
+	write_string_nt(&buf, "stmt_1")
+	write_string_nt(&buf, "SELECT $1::int4;")
+	write_i16(&buf, 1)
+	write_u32(&buf, 23) // INT4OID
+	finish_packet(&buf, l_pos)
 
 	r: Reader
 	reader_init(&r, buf[:])
@@ -305,7 +347,7 @@ test_reader_writer_structs :: proc(t: ^testing.T) {
 }
 
 @(test)
-test_reader_writer_extended :: proc(t: ^testing.T) {
+test_packet_untyped_mixed_reads :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
@@ -313,16 +355,13 @@ test_reader_writer_extended :: proc(t: ^testing.T) {
 
 	buf: [dynamic]byte
 
-	w: Writer
-	writer_init(&w, &buf)
-
-	l_pos := writer_begin_packet_untyped(&w)
-	writer_write_u8(&w, 0x11)
-	writer_write_u16(&w, 0x2233)
-	writer_write_i64(&w, 0x0102030405060708)
-	writer_write_bytes(&w, []byte{0xDE, 0xAD, 0xBE, 0xEF})
-	writer_write_string_nt(&w, "cloned_str")
-	writer_end_packet(&w, l_pos)
+	l_pos := write_packet_header_untyped(&buf)
+	write_u8(&buf, 0x11)
+	write_u16(&buf, 0x2233)
+	write_i64(&buf, 0x0102030405060708)
+	write_bytes(&buf, []byte{0xDE, 0xAD, 0xBE, 0xEF})
+	write_string_nt(&buf, "cloned_str")
+	finish_packet(&buf, l_pos)
 
 	r: Reader
 	reader_init(&r, buf[:])
@@ -355,7 +394,7 @@ test_reader_writer_extended :: proc(t: ^testing.T) {
 	testing.expect_value(t, bytes_val[3], u8(0xEF))
 
 	cloned_s, ok_clone := reader_read_string_nt_clone(&r, context.temp_allocator)
-	testing.expect(t, ok_clone, "read_string_nt_clone failed")
+	testing.expect(t, ok_clone, "reader_read_string_nt_clone failed")
 	testing.expect_value(t, cloned_s, "cloned_str")
 
 	testing.expect_value(t, reader_remaining(&r), 0)
@@ -377,85 +416,56 @@ test_buffer_edge_cases :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	// 1. Empty buffer tests
-	empty := []byte{}
-	offset := 0
-	_, ok_u8 := read_u8(empty, &offset)
-	testing.expect(t, !ok_u8, "empty read_u8 should fail")
-	testing.expect_value(t, offset, 0)
-
-	_, ok_str := read_string_nt(empty, &offset)
-	testing.expect(t, !ok_str, "empty read_string_nt should fail")
-	testing.expect_value(t, offset, 0)
-
-	_, ok_str_cl := read_string_nt_clone(empty, &offset, context.temp_allocator)
-	testing.expect(t, !ok_str_cl, "empty read_string_nt_clone should fail")
-	testing.expect_value(t, offset, 0)
-
-	// 2. Null-only string
+	// 1. Null-only string
 	only_null := []byte{0x00}
-	offset = 0
-	str, ok_null := read_string_nt(only_null, &offset)
+	r: Reader
+	reader_init(&r, only_null)
+	str, ok_null := reader_read_string_nt(&r)
 	testing.expect(t, ok_null, "null-only string should succeed")
 	testing.expect_value(t, str, "")
-	testing.expect_value(t, offset, 1)
+	testing.expect_value(t, r.offset, 1)
 
-	offset = 0
-	str_cl, ok_null_cl := read_string_nt_clone(only_null, &offset, context.temp_allocator)
+	reader_init(&r, only_null)
+	str_cl, ok_null_cl := reader_read_string_nt_clone(&r, context.temp_allocator)
 	testing.expect(t, ok_null_cl, "null-only string clone should succeed")
 	testing.expect_value(t, str_cl, "")
-	testing.expect_value(t, offset, 1)
+	testing.expect_value(t, r.offset, 1)
 
-	// 3. Negative count in read_bytes_counted
+	// 2. Negative count in reader_read_bytes
 	neg_bytes := []byte{1, 2, 3}
-	offset = 0
-	_, ok_neg := read_bytes_counted(neg_bytes, &offset, -5)
+	reader_init(&r, neg_bytes)
+	_, ok_neg := reader_read_bytes(&r, -5)
 	testing.expect(t, !ok_neg, "negative count should fail")
-	testing.expect_value(t, offset, 0)
+	testing.expect_value(t, r.offset, 0)
 
-	// 4. Zero count in read_bytes_counted
-	zero_bytes, ok_zero := read_bytes_counted(neg_bytes, &offset, 0)
+	// 3. Zero count in reader_read_bytes
+	zero_bytes, ok_zero := reader_read_bytes(&r, 0)
 	testing.expect(t, ok_zero, "zero count should succeed")
 	testing.expect_value(t, len(zero_bytes), 0)
-	testing.expect_value(t, offset, 0)
+	testing.expect_value(t, r.offset, 0)
 
-	// 5. Negative initial offset
-	neg_offset := -1
-	_, ok_neg_off := read_u8(neg_bytes, &neg_offset)
+	// 4. Negative cursor offset
+	reader_init(&r, neg_bytes)
+	r.offset = -1
+	_, ok_neg_off := reader_read_u8(&r)
 	testing.expect(t, !ok_neg_off, "negative offset should fail")
-	testing.expect_value(t, neg_offset, -1)
+	testing.expect_value(t, r.offset, -1)
 
-	neg_offset = -1
-	_, ok_neg_off_str := read_string_nt(neg_bytes, &neg_offset)
+	_, ok_neg_off_str := reader_read_string_nt(&r)
 	testing.expect(t, !ok_neg_off_str, "negative offset string should fail")
-	testing.expect_value(t, neg_offset, -1)
+	testing.expect_value(t, r.offset, -1)
 
-	// 6. Reader struct bounds and edge cases
-	r: Reader
+	_, ok_neg_off_bytes := reader_read_bytes(&r, 1)
+	testing.expect(t, !ok_neg_off_bytes, "negative offset bytes should fail")
+	testing.expect_value(t, r.offset, -1)
+
+	// 5. Empty reader bounds queries
+	empty := []byte{}
 	reader_init(&r, empty)
 	testing.expect_value(t, reader_remaining(&r), 0)
 	testing.expect(t, !reader_has_bytes(&r, 1), "empty reader has no bytes")
 	testing.expect(t, reader_has_bytes(&r, 0), "empty reader has 0 bytes")
 	testing.expect(t, !reader_has_bytes(&r, -1), "negative count has_bytes returns false")
-
-	_, ok_r_u8 := reader_read_u8(&r)
-	testing.expect(t, !ok_r_u8, "empty reader_read_u8 should fail")
-	_, ok_r_i16 := reader_read_i16(&r)
-	testing.expect(t, !ok_r_i16, "empty reader_read_i16 should fail")
-	_, ok_r_u16 := reader_read_u16(&r)
-	testing.expect(t, !ok_r_u16, "empty reader_read_u16 should fail")
-	_, ok_r_i32 := reader_read_i32(&r)
-	testing.expect(t, !ok_r_i32, "empty reader_read_i32 should fail")
-	_, ok_r_u32 := reader_read_u32(&r)
-	testing.expect(t, !ok_r_u32, "empty reader_read_u32 should fail")
-	_, ok_r_i64 := reader_read_i64(&r)
-	testing.expect(t, !ok_r_i64, "empty reader_read_i64 should fail")
-	_, ok_r_bytes := reader_read_bytes(&r, 1)
-	testing.expect(t, !ok_r_bytes, "empty reader_read_bytes should fail")
-	_, ok_r_str := reader_read_string_nt(&r)
-	testing.expect(t, !ok_r_str, "empty reader_read_string_nt should fail")
-	_, ok_r_str_cl := reader_read_string_nt_clone(&r, context.temp_allocator)
-	testing.expect(t, !ok_r_str_cl, "empty reader_read_string_nt_clone should fail")
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -470,27 +480,24 @@ test_boundary_integers_roundtrip :: proc(t: ^testing.T) {
 	buf: [dynamic]byte
 	defer delete(buf)
 
-	w: Writer
-	writer_init(&w, &buf)
-
 	// Write minimum and maximum boundary values for each integer type
-	writer_write_u8(&w, 0)
-	writer_write_u8(&w, 255)
+	write_u8(&buf, 0)
+	write_u8(&buf, 255)
 
-	writer_write_i16(&w, min(i16))
-	writer_write_i16(&w, max(i16))
+	write_i16(&buf, min(i16))
+	write_i16(&buf, max(i16))
 
-	writer_write_u16(&w, min(u16))
-	writer_write_u16(&w, max(u16))
+	write_u16(&buf, min(u16))
+	write_u16(&buf, max(u16))
 
-	writer_write_i32(&w, min(i32))
-	writer_write_i32(&w, max(i32))
+	write_i32(&buf, min(i32))
+	write_i32(&buf, max(i32))
 
-	writer_write_u32(&w, min(u32))
-	writer_write_u32(&w, max(u32))
+	write_u32(&buf, min(u32))
+	write_u32(&buf, max(u32))
 
-	writer_write_i64(&w, min(i64))
-	writer_write_i64(&w, max(i64))
+	write_i64(&buf, min(i64))
+	write_i64(&buf, max(i64))
 
 	r: Reader
 	reader_init(&r, buf[:])
@@ -576,33 +583,24 @@ test_read_string_nt_clone_allocator_failure :: proc(t: ^testing.T) {
 
 	data := []byte{'h', 'e', 'l', 'l', 'o', 0x00, 'w', 'o', 'r', 'l', 'd', 0x00}
 
-	// Test stateless read_string_nt_clone with failing allocator
-	offset := 0
-	_, ok := read_string_nt_clone(data, &offset, failing_allocator)
-	testing.expect(t, !ok, "read_string_nt_clone should fail with failing_allocator")
-	testing.expect_value(t, offset, 0)
-
-	// Verify reading succeeds with proper allocator and advances offset
-	val, ok_valid := read_string_nt_clone(data, &offset, context.temp_allocator)
-	testing.expect(t, ok_valid, "read_string_nt_clone should succeed with valid allocator")
-	testing.expect_value(t, val, "hello")
-	testing.expect_value(t, offset, 6)
-
-	// Test Reader struct read_string_nt_clone with failing allocator
+	// Failing allocator must not advance the cursor
 	r: Reader
 	reader_init(&r, data)
 	_, ok_r := reader_read_string_nt_clone(&r, failing_allocator)
 	testing.expect(t, !ok_r, "reader_read_string_nt_clone should fail with failing_allocator")
 	testing.expect_value(t, r.offset, 0)
 
+	// Valid allocator succeeds and advances past the terminator
 	val_r, ok_r_valid := reader_read_string_nt_clone(&r, context.temp_allocator)
 	testing.expect(t, ok_r_valid, "reader_read_string_nt_clone should succeed with valid allocator")
 	testing.expect_value(t, val_r, "hello")
 	testing.expect_value(t, r.offset, 6)
 
+	// Second string on the same reader
+	val_r2, ok_r2 := reader_read_string_nt_clone(&r, context.temp_allocator)
+	testing.expect(t, ok_r2, "second clone should succeed")
+	testing.expect_value(t, val_r2, "world")
+	testing.expect_value(t, r.offset, 12)
+
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
-
-
-
-

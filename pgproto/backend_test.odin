@@ -141,27 +141,25 @@ test_parse_query_result_messages :: proc(t: ^testing.T) {
 	// Field 1: "id", table_oid 1234, col_attr 1, type_oid 23 (INT4), type_size 4, typmod -1, format 0
 	// Field 2: "name", table_oid 1234, col_attr 2, type_oid 25 (TEXT), type_size -1, typmod -1, format 0
 	var_rd: [dynamic]byte
-	w: Writer
-	writer_init(&w, &var_rd)
-	len_pos := writer_begin_packet(&w, 'T')
-	writer_write_i16(&w, 2) // 2 fields
+	len_pos := write_packet_header(&var_rd, 'T')
+	write_i16(&var_rd, 2) // 2 fields
 	// Col 1
-	writer_write_string_nt(&w, "id")
-	writer_write_u32(&w, 1234)
-	writer_write_i16(&w, 1)
-	writer_write_u32(&w, 23)
-	writer_write_i16(&w, 4)
-	writer_write_i32(&w, -1)
-	writer_write_i16(&w, 0)
+	write_string_nt(&var_rd, "id")
+	write_u32(&var_rd, 1234)
+	write_i16(&var_rd, 1)
+	write_u32(&var_rd, 23)
+	write_i16(&var_rd, 4)
+	write_i32(&var_rd, -1)
+	write_i16(&var_rd, 0)
 	// Col 2
-	writer_write_string_nt(&w, "name")
-	writer_write_u32(&w, 1234)
-	writer_write_i16(&w, 2)
-	writer_write_u32(&w, 25)
-	writer_write_i16(&w, -1)
-	writer_write_i32(&w, -1)
-	writer_write_i16(&w, 0)
-	writer_end_packet(&w, len_pos)
+	write_string_nt(&var_rd, "name")
+	write_u32(&var_rd, 1234)
+	write_i16(&var_rd, 2)
+	write_u32(&var_rd, 25)
+	write_i16(&var_rd, -1)
+	write_i32(&var_rd, -1)
+	write_i16(&var_rd, 0)
+	finish_packet(&var_rd, len_pos)
 
 	msg_rd, n_rd, err_rd := parse_message(var_rd[:])
 	testing.expect_value(t, err_rd, nil)
@@ -186,15 +184,14 @@ test_parse_query_result_messages :: proc(t: ^testing.T) {
 
 	// 4. DataRow ('D') with 1 valid value and 1 NULL value
 	var_dr: [dynamic]byte
-	writer_init(&w, &var_dr)
-	dr_pos := writer_begin_packet(&w, 'D')
-	writer_write_i16(&w, 2) // 2 columns
+	dr_pos := write_packet_header(&var_dr, 'D')
+	write_i16(&var_dr, 2) // 2 columns
 	// Col 1: length 2, bytes "42"
-	writer_write_i32(&w, 2)
-	writer_write_bytes(&w, transmute([]byte)string("42"))
+	write_i32(&var_dr, 2)
+	write_bytes(&var_dr, transmute([]byte)string("42"))
 	// Col 2: NULL (length -1)
-	writer_write_i32(&w, -1)
-	writer_end_packet(&w, dr_pos)
+	write_i32(&var_dr, -1)
+	finish_packet(&var_dr, dr_pos)
 
 	msg_dr, n_dr, err_dr := parse_message(var_dr[:])
 	testing.expect_value(t, err_dr, nil)
@@ -222,11 +219,9 @@ test_parse_query_result_edge_cases :: proc(t: ^testing.T) {
 
 	// RowDescription with 0 fields
 	var_rd0: [dynamic]byte
-	w: Writer
-	writer_init(&w, &var_rd0)
-	pos := writer_begin_packet(&w, 'T')
-	writer_write_i16(&w, 0)
-	writer_end_packet(&w, pos)
+	pos := write_packet_header(&var_rd0, 'T')
+	write_i16(&var_rd0, 0)
+	finish_packet(&var_rd0, pos)
 	msg_rd0, _, err_rd0 := parse_message(var_rd0[:])
 	testing.expect_value(t, err_rd0, nil)
 	rd0, is_rd0 := msg_rd0.(Msg_Row_Description)
@@ -245,22 +240,20 @@ test_parse_query_result_edge_cases :: proc(t: ^testing.T) {
 
 	// RowDescription truncated in field data
 	var_rd_trunc: [dynamic]byte
-	writer_init(&w, &var_rd_trunc)
-	pos_t := writer_begin_packet(&w, 'T')
-	writer_write_i16(&w, 1)
-	writer_write_string_nt(&w, "col1")
-	writer_write_u32(&w, 100)
+	pos_t := write_packet_header(&var_rd_trunc, 'T')
+	write_i16(&var_rd_trunc, 1)
+	write_string_nt(&var_rd_trunc, "col1")
+	write_u32(&var_rd_trunc, 100)
 	// truncated before remaining field metadata
-	writer_end_packet(&w, pos_t)
+	finish_packet(&var_rd_trunc, pos_t)
 	_, _, err_rd_trunc := parse_message(var_rd_trunc[:])
 	testing.expect(t, err_rd_trunc != nil, "expected error on truncated field description")
 
 	// DataRow with 0 columns
 	var_dr0: [dynamic]byte
-	writer_init(&w, &var_dr0)
-	dr0_pos := writer_begin_packet(&w, 'D')
-	writer_write_i16(&w, 0)
-	writer_end_packet(&w, dr0_pos)
+	dr0_pos := write_packet_header(&var_dr0, 'D')
+	write_i16(&var_dr0, 0)
+	finish_packet(&var_dr0, dr0_pos)
 	msg_dr0, _, err_dr0 := parse_message(var_dr0[:])
 	testing.expect_value(t, err_dr0, nil)
 	dr0, is_dr0 := msg_dr0.(Msg_Data_Row)
@@ -279,22 +272,20 @@ test_parse_query_result_edge_cases :: proc(t: ^testing.T) {
 
 	// DataRow with invalid negative length (< -1, e.g. -2)
 	var_dr_bad_len: [dynamic]byte
-	writer_init(&w, &var_dr_bad_len)
-	dr_bl_pos := writer_begin_packet(&w, 'D')
-	writer_write_i16(&w, 1)
-	writer_write_i32(&w, -2)
-	writer_end_packet(&w, dr_bl_pos)
+	dr_bl_pos := write_packet_header(&var_dr_bad_len, 'D')
+	write_i16(&var_dr_bad_len, 1)
+	write_i32(&var_dr_bad_len, -2)
+	finish_packet(&var_dr_bad_len, dr_bl_pos)
 	_, _, err_dr_bad_len := parse_message(var_dr_bad_len[:])
 	testing.expect(t, err_dr_bad_len != nil, "expected error on col_len < -1")
 
 	// DataRow truncated column value
 	var_dr_trunc: [dynamic]byte
-	writer_init(&w, &var_dr_trunc)
-	dr_tr_pos := writer_begin_packet(&w, 'D')
-	writer_write_i16(&w, 1)
-	writer_write_i32(&w, 10) // specifies 10 bytes
-	writer_write_bytes(&w, transmute([]byte)string("abc")) // only 3 bytes written
-	writer_end_packet(&w, dr_tr_pos)
+	dr_tr_pos := write_packet_header(&var_dr_trunc, 'D')
+	write_i16(&var_dr_trunc, 1)
+	write_i32(&var_dr_trunc, 10) // specifies 10 bytes
+	write_bytes(&var_dr_trunc, transmute([]byte)string("abc")) // only 3 bytes written
+	finish_packet(&var_dr_trunc, dr_tr_pos)
 	_, _, err_dr_trunc := parse_message(var_dr_trunc[:])
 	testing.expect(t, err_dr_trunc != nil, "expected error on truncated column value")
 
@@ -321,19 +312,17 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 
 	// ErrorResponse ('E') with SQLSTATE 42P01 (undefined table)
 	var_err: [dynamic]byte
-	w: Writer
-	writer_init(&w, &var_err)
-	pos := writer_begin_packet(&w, 'E')
-	writer_write_u8(&w, 'S'); writer_write_string_nt(&w, "ERROR")
-	writer_write_u8(&w, 'V'); writer_write_string_nt(&w, "ERROR")
-	writer_write_u8(&w, 'C'); writer_write_string_nt(&w, "42P01")
-	writer_write_u8(&w, 'M'); writer_write_string_nt(&w, "relation \"nonexistent\" does not exist")
-	writer_write_u8(&w, 'P'); writer_write_string_nt(&w, "15")
-	writer_write_u8(&w, 'F'); writer_write_string_nt(&w, "parse_relation.c")
-	writer_write_u8(&w, 'L'); writer_write_string_nt(&w, "1374")
-	writer_write_u8(&w, 'R'); writer_write_string_nt(&w, "parserOpenTable")
-	writer_write_u8(&w, 0x00) // terminating null
-	writer_end_packet(&w, pos)
+	pos := write_packet_header(&var_err, 'E')
+	write_u8(&var_err, 'S'); write_string_nt(&var_err, "ERROR")
+	write_u8(&var_err, 'V'); write_string_nt(&var_err, "ERROR")
+	write_u8(&var_err, 'C'); write_string_nt(&var_err, "42P01")
+	write_u8(&var_err, 'M'); write_string_nt(&var_err, "relation \"nonexistent\" does not exist")
+	write_u8(&var_err, 'P'); write_string_nt(&var_err, "15")
+	write_u8(&var_err, 'F'); write_string_nt(&var_err, "parse_relation.c")
+	write_u8(&var_err, 'L'); write_string_nt(&var_err, "1374")
+	write_u8(&var_err, 'R'); write_string_nt(&var_err, "parserOpenTable")
+	write_u8(&var_err, 0x00) // terminating null
+	finish_packet(&var_err, pos)
 
 	msg_e, n_e, err_e := parse_message(var_err[:])
 	testing.expect_value(t, err_e, nil)
@@ -350,12 +339,11 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 
 	// NoticeResponse ('N')
 	var_n: [dynamic]byte
-	writer_init(&w, &var_n)
-	n_pos := writer_begin_packet(&w, 'N')
-	writer_write_u8(&w, 'S'); writer_write_string_nt(&w, "NOTICE")
-	writer_write_u8(&w, 'M'); writer_write_string_nt(&w, "table created successfully")
-	writer_write_u8(&w, 0x00)
-	writer_end_packet(&w, n_pos)
+	n_pos := write_packet_header(&var_n, 'N')
+	write_u8(&var_n, 'S'); write_string_nt(&var_n, "NOTICE")
+	write_u8(&var_n, 'M'); write_string_nt(&var_n, "table created successfully")
+	write_u8(&var_n, 0x00)
+	finish_packet(&var_n, n_pos)
 
 	msg_n, n_n, err_n := parse_message(var_n[:])
 	testing.expect_value(t, err_n, nil)
@@ -367,28 +355,27 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 
 	// All structured error fields
 	var_all: [dynamic]byte
-	writer_init(&w, &var_all)
-	all_pos := writer_begin_packet(&w, 'E')
-	writer_write_u8(&w, 'S'); writer_write_string_nt(&w, "FATAL")
-	writer_write_u8(&w, 'V'); writer_write_string_nt(&w, "FATAL")
-	writer_write_u8(&w, 'C'); writer_write_string_nt(&w, "28P01")
-	writer_write_u8(&w, 'M'); writer_write_string_nt(&w, "password authentication failed")
-	writer_write_u8(&w, 'D'); writer_write_string_nt(&w, "User does not exist")
-	writer_write_u8(&w, 'H'); writer_write_string_nt(&w, "Check your credentials")
-	writer_write_u8(&w, 'P'); writer_write_string_nt(&w, "1")
-	writer_write_u8(&w, 'p'); writer_write_string_nt(&w, "2")
-	writer_write_u8(&w, 'q'); writer_write_string_nt(&w, "SELECT 1")
-	writer_write_u8(&w, 'W'); writer_write_string_nt(&w, "PL/pgSQL function auth()")
-	writer_write_u8(&w, 's'); writer_write_string_nt(&w, "public")
-	writer_write_u8(&w, 't'); writer_write_string_nt(&w, "users")
-	writer_write_u8(&w, 'c'); writer_write_string_nt(&w, "password")
-	writer_write_u8(&w, 'd'); writer_write_string_nt(&w, "varchar")
-	writer_write_u8(&w, 'n'); writer_write_string_nt(&w, "users_pkey")
-	writer_write_u8(&w, 'F'); writer_write_string_nt(&w, "auth.c")
-	writer_write_u8(&w, 'L'); writer_write_string_nt(&w, "42")
-	writer_write_u8(&w, 'R'); writer_write_string_nt(&w, "CheckPassword")
-	writer_write_u8(&w, 0x00)
-	writer_end_packet(&w, all_pos)
+	all_pos := write_packet_header(&var_all, 'E')
+	write_u8(&var_all, 'S'); write_string_nt(&var_all, "FATAL")
+	write_u8(&var_all, 'V'); write_string_nt(&var_all, "FATAL")
+	write_u8(&var_all, 'C'); write_string_nt(&var_all, "28P01")
+	write_u8(&var_all, 'M'); write_string_nt(&var_all, "password authentication failed")
+	write_u8(&var_all, 'D'); write_string_nt(&var_all, "User does not exist")
+	write_u8(&var_all, 'H'); write_string_nt(&var_all, "Check your credentials")
+	write_u8(&var_all, 'P'); write_string_nt(&var_all, "1")
+	write_u8(&var_all, 'p'); write_string_nt(&var_all, "2")
+	write_u8(&var_all, 'q'); write_string_nt(&var_all, "SELECT 1")
+	write_u8(&var_all, 'W'); write_string_nt(&var_all, "PL/pgSQL function auth()")
+	write_u8(&var_all, 's'); write_string_nt(&var_all, "public")
+	write_u8(&var_all, 't'); write_string_nt(&var_all, "users")
+	write_u8(&var_all, 'c'); write_string_nt(&var_all, "password")
+	write_u8(&var_all, 'd'); write_string_nt(&var_all, "varchar")
+	write_u8(&var_all, 'n'); write_string_nt(&var_all, "users_pkey")
+	write_u8(&var_all, 'F'); write_string_nt(&var_all, "auth.c")
+	write_u8(&var_all, 'L'); write_string_nt(&var_all, "42")
+	write_u8(&var_all, 'R'); write_string_nt(&var_all, "CheckPassword")
+	write_u8(&var_all, 0x00)
+	finish_packet(&var_all, all_pos)
 
 	msg_all, n_all, err_all := parse_message(var_all[:])
 	testing.expect_value(t, err_all, nil)
@@ -429,14 +416,12 @@ test_parse_error_and_notice_edge_cases :: proc(t: ^testing.T) {
 
 	// 1. Unknown field code should be ignored gracefully
 	var_unk: [dynamic]byte
-	w: Writer
-	writer_init(&w, &var_unk)
-	unk_pos := writer_begin_packet(&w, 'E')
-	writer_write_u8(&w, 'S'); writer_write_string_nt(&w, "ERROR")
-	writer_write_u8(&w, 'Z'); writer_write_string_nt(&w, "future_field_value")
-	writer_write_u8(&w, 'M'); writer_write_string_nt(&w, "msg")
-	writer_write_u8(&w, 0x00)
-	writer_end_packet(&w, unk_pos)
+	unk_pos := write_packet_header(&var_unk, 'E')
+	write_u8(&var_unk, 'S'); write_string_nt(&var_unk, "ERROR")
+	write_u8(&var_unk, 'Z'); write_string_nt(&var_unk, "future_field_value")
+	write_u8(&var_unk, 'M'); write_string_nt(&var_unk, "msg")
+	write_u8(&var_unk, 0x00)
+	finish_packet(&var_unk, unk_pos)
 
 	msg_unk, _, err_unk := parse_message(var_unk[:])
 	testing.expect_value(t, err_unk, nil)
@@ -447,23 +432,21 @@ test_parse_error_and_notice_edge_cases :: proc(t: ^testing.T) {
 
 	// 2. Unterminated field string
 	var_unterm: [dynamic]byte
-	writer_init(&w, &var_unterm)
-	unterm_pos := writer_begin_packet(&w, 'E')
-	writer_write_u8(&w, 'M')
-	writer_write_bytes(&w, transmute([]byte)string("unterminated message"))
+	unterm_pos := write_packet_header(&var_unterm, 'E')
+	write_u8(&var_unterm, 'M')
+	write_bytes(&var_unterm, transmute([]byte)string("unterminated message"))
 	// no null byte written
-	writer_end_packet(&w, unterm_pos)
+	finish_packet(&var_unterm, unterm_pos)
 
 	_, _, err_unterm := parse_message(var_unterm[:])
 	testing.expect(t, err_unterm != nil, "expected error on unterminated field string")
 
 	// 3. Missing packet terminating null byte
 	var_no_null: [dynamic]byte
-	writer_init(&w, &var_no_null)
-	nn_pos := writer_begin_packet(&w, 'E')
-	writer_write_u8(&w, 'M'); writer_write_string_nt(&w, "valid message")
+	nn_pos := write_packet_header(&var_no_null, 'E')
+	write_u8(&var_no_null, 'M'); write_string_nt(&var_no_null, "valid message")
 	// missing 0x00 terminating null byte
-	writer_end_packet(&w, nn_pos)
+	finish_packet(&var_no_null, nn_pos)
 
 	_, _, err_nn := parse_message(var_no_null[:])
 	testing.expect(t, err_nn != nil, "expected error on missing terminating null byte")
@@ -530,13 +513,11 @@ test_parse_extended_and_copy_messages :: proc(t: ^testing.T) {
 
 	// 3. NotificationResponse ('A')
 	var_a: [dynamic]byte
-	w: Writer
-	writer_init(&w, &var_a)
-	a_pos := writer_begin_packet(&w, 'A')
-	writer_write_i32(&w, 9999)
-	writer_write_string_nt(&w, "events_channel")
-	writer_write_string_nt(&w, "{\"action\":\"insert\"}")
-	writer_end_packet(&w, a_pos)
+	a_pos := write_packet_header(&var_a, 'A')
+	write_i32(&var_a, 9999)
+	write_string_nt(&var_a, "events_channel")
+	write_string_nt(&var_a, "{\"action\":\"insert\"}")
+	finish_packet(&var_a, a_pos)
 
 	m_a, n_a, err_a := parse_message(var_a[:])
 	testing.expect_value(t, err_a, nil)
@@ -549,13 +530,12 @@ test_parse_extended_and_copy_messages :: proc(t: ^testing.T) {
 
 	// 4. CopyInResponse ('G'), CopyOutResponse ('H'), CopyBothResponse ('W')
 	var_g: [dynamic]byte
-	writer_init(&w, &var_g)
-	g_pos := writer_begin_packet(&w, 'G')
-	writer_write_u8(&w, 0) // overall format text
-	writer_write_i16(&w, 2)
-	writer_write_i16(&w, 0)
-	writer_write_i16(&w, 1)
-	writer_end_packet(&w, g_pos)
+	g_pos := write_packet_header(&var_g, 'G')
+	write_u8(&var_g, 0) // overall format text
+	write_i16(&var_g, 2)
+	write_i16(&var_g, 0)
+	write_i16(&var_g, 1)
+	finish_packet(&var_g, g_pos)
 
 	m_g, n_g, err_g := parse_message(var_g[:])
 	testing.expect_value(t, err_g, nil)
@@ -568,12 +548,11 @@ test_parse_extended_and_copy_messages :: proc(t: ^testing.T) {
 	testing.expect_value(t, copy_in.column_format_codes[1], Field_Format.Binary)
 
 	var_h: [dynamic]byte
-	writer_init(&w, &var_h)
-	h_pos := writer_begin_packet(&w, 'H')
-	writer_write_u8(&w, 1) // overall format binary
-	writer_write_i16(&w, 1)
-	writer_write_i16(&w, 1)
-	writer_end_packet(&w, h_pos)
+	h_pos := write_packet_header(&var_h, 'H')
+	write_u8(&var_h, 1) // overall format binary
+	write_i16(&var_h, 1)
+	write_i16(&var_h, 1)
+	finish_packet(&var_h, h_pos)
 
 	m_h, n_h, err_h := parse_message(var_h[:])
 	testing.expect_value(t, err_h, nil)
@@ -585,11 +564,10 @@ test_parse_extended_and_copy_messages :: proc(t: ^testing.T) {
 	testing.expect_value(t, copy_out.column_format_codes[0], Field_Format.Binary)
 
 	var_w: [dynamic]byte
-	writer_init(&w, &var_w)
-	w_pos := writer_begin_packet(&w, 'W')
-	writer_write_u8(&w, 0) // overall format text
-	writer_write_i16(&w, 0)
-	writer_end_packet(&w, w_pos)
+	w_pos := write_packet_header(&var_w, 'W')
+	write_u8(&var_w, 0) // overall format text
+	write_i16(&var_w, 0)
+	finish_packet(&var_w, w_pos)
 
 	m_w, n_w, err_w := parse_message(var_w[:])
 	testing.expect_value(t, err_w, nil)
@@ -637,13 +615,12 @@ test_parse_extended_and_copy_messages :: proc(t: ^testing.T) {
 
 	// 7. NegotiateProtocolVersion ('v')
 	var_v: [dynamic]byte
-	writer_init(&w, &var_v)
-	v_pos := writer_begin_packet(&w, 'v')
-	writer_write_i32(&w, 1) // minor version 1
-	writer_write_i32(&w, 2) // 2 unrecognized options
-	writer_write_string_nt(&w, "opt1")
-	writer_write_string_nt(&w, "opt2")
-	writer_end_packet(&w, v_pos)
+	v_pos := write_packet_header(&var_v, 'v')
+	write_i32(&var_v, 1) // minor version 1
+	write_i32(&var_v, 2) // 2 unrecognized options
+	write_string_nt(&var_v, "opt1")
+	write_string_nt(&var_v, "opt2")
+	finish_packet(&var_v, v_pos)
 
 	m_v, n_v, err_v := parse_message(var_v[:])
 	testing.expect_value(t, err_v, nil)

@@ -52,11 +52,12 @@ parse_authentication :: proc(
 	case .SASL:
 		mechs := make([dynamic]string, allocator)
 		for {
-			if reader_remaining(&r) == 0 {
+			next_byte, has_next := reader_peek_u8(&r)
+			if !has_next {
 				break
 			}
-			if r.buf[r.offset] == 0x00 {
-				r.offset += 1
+			if next_byte == 0x00 {
+				_, _ = reader_read_u8(&r)
 				break
 			}
 			mech_str, str_ok := reader_read_string_nt(&r)

@@ -31,6 +31,10 @@ Layer 3: pgorm (Reflection Mapper & Type System)
 Layer 4: opg (Public Facade & End-to-End Integration)
   ├── OPG-401: Public Root Driver API & Ergonomic Facade
   └── OPG-402: Full End-to-End Integration, Stress & Coverage Audit (>=95%)
+
+Epic 5: multi-platform (CI Matrix & Native TLS Backends)
+  ├── OPG-501: GitHub Actions CI Matrix (Linux / macOS / Windows)
+  └── OPG-502: Native TLS Backends via core:dynlib (Schannel & SecureTransport)
 ```
 
 ---
@@ -441,3 +445,55 @@ Layer 4: opg (Public Facade & End-to-End Integration)
   - Verification: `odin test tests -all-packages -sanitize:address` passes.
   - Final audit: every message variant, error path, and public procedure has an explicit test
     (Odin has no coverage tooling; enumerate, don't estimate).
+
+---
+
+# Epic 5: multi-platform (CI Matrix & Native TLS Backends)
+
+> **Goal**: Prove the driver builds, passes tests, and speaks TLS on Linux, macOS, and Windows — native OS TLS libraries first, OpenSSL as fallback.
+> **Layer**: Infrastructure + `pgconn`
+> **Ordering**: Independent of Epics 3–4; can proceed in parallel. OPG-502 requires OPG-501's runners to exist first — untestable platform code is not shipped (see the OPG-205 scope decision this epic lifts).
+
+---
+
+### [OPG-501] GitHub Actions CI Matrix (Linux / macOS / Windows)
+- [ ] **Status**: Open
+- **Layer**: Infrastructure
+- **Files**:
+  - `.github/workflows/ci.yml`
+- **Prerequisites**: none (current `main`)
+- **Description**:
+  Set up a GitHub Actions workflow with a three-OS runner matrix (`ubuntu-latest`, `macos-latest`, `windows-latest`). Every job installs the pinned Odin nightly for its platform and runs the offline gate; the Linux job additionally runs the full dockerized integration suite and sanitizers. This is the first time the tree compiles anywhere but Linux — portability fixes surfaced by the macOS/Windows compiles (e.g. `core:net` / `core:os` differences) are **in scope** for this task.
+- **Features**:
+  - Trigger on push and pull_request to `main`.
+  - Pinned Odin nightly per OS (document the pin; bumping it is a one-line change).
+  - All three OSes: `odin test tests -all-packages -vet -strict-style`.
+  - Linux job: `scripts/integration-test.sh` (docker compose harness), plus `odin test pgconn -define:OPG_INTEGRATION=true -sanitize:thread` and `-sanitize:address`.
+  - macOS/Windows integration testing intentionally deferred to OPG-502, which provisions runner-local PostgreSQL anyway (the harness's `PGHOST` override — which skips docker entirely — was built for exactly this).
+- **Acceptance Criteria**:
+  - Workflow green on all three OSes for the offline gate.
+  - Linux job green on integration + TSan + ASan.
+  - A failing test on any OS fails the workflow (no `continue-on-error` masking).
+
+---
+
+### [OPG-502] Native TLS Backends via `core:dynlib` (Schannel & SecureTransport)
+- [ ] **Status**: Open
+- **Layer**: `pgconn`
+- **Files**:
+  - `pgconn/tls.odin` (backend-selection refactor)
+  - `pgconn/tls_windows.odin` (Schannel via `secur32.dll` / `sspicli.dll`)
+  - `pgconn/tls_darwin.odin` (SecureTransport via `Security.framework`)
+  - `.github/workflows/ci.yml` (macOS/Windows integration jobs)
+- **Prerequisites**: `OPG-501`, `OPG-205`
+- **Description**:
+  Implement and test the native OS TLS backends deferred from OPG-205. Refactor the probe into a backend-selection architecture: probing returns a `TLS_Backend` (name + `wrap(socket, server_name) -> (Stream_Transport, Error)`), tried in per-OS priority order — **Windows**: Schannel (SSPI: `AcquireCredentialsHandle` / `InitializeSecurityContext` / `EncryptMessage` / `DecryptMessage`), fallback OpenSSL; **macOS**: SecureTransport (`SSLCreateContext` / `SSLSetIOFuncs` / `SSLHandshake` / `SSLRead` / `SSLWrite` — deprecated by Apple but the only dlopen-able C API that wraps a raw fd; Network.framework is not viable for this), fallback OpenSSL; **Linux**: OpenSSL (unchanged). Expose the selected backend name so tests can pin which library actually performed the handshake.
+- **Features**:
+  - CI provisions runner-local TLS-enabled PostgreSQL on macOS (Homebrew) and Windows (runner-image service), reusing the auth-scenario and ssl setup from `scripts/pg-init/` in native form; integration tests target it via the `PGHOST`/`PGPORT`/... overrides.
+  - Backend-order unit tests with injected probe lists: native missing → OpenSSL fallback; all missing → graceful `TLS_Handshake_Failed` under `require`, plaintext under `prefer`.
+- **Acceptance Criteria**:
+  - `windows-latest`: TLS integration tests pass with the **Schannel** backend selected (asserted via backend name, not inferred — the runner may also carry an OpenSSL DLL).
+  - `macos-latest`: TLS integration tests pass with the **SecureTransport** backend selected.
+  - `ubuntu-latest`: OpenSSL backend still selected; full suite stays green.
+  - `pg_stat_ssl` pins `ssl = t` for `require` mode on all three OSes.
+  - Backend fallback ordering covered by unit tests; graceful-absence semantics from OPG-205 preserved.

@@ -431,7 +431,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-402] Full End-to-End Integration, Stress & Coverage Audit ($\ge 95\%$)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: Whole Project
 - **Files**:
   - `tests/e2e_test.odin`

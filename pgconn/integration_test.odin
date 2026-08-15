@@ -683,4 +683,124 @@ when OPG_INTEGRATION {
 		testing.expect_value(t, conn.status, Conn_Status.Ready)
 	}
 
+	// ------------------------------------------------------------------------
+	// Connection pool against live PostgreSQL (real TCP dial path)
+	// ------------------------------------------------------------------------
+
+	integration_pool_config :: proc(t: ^testing.T, min_conns, max_conns: int) -> Pool_Config {
+		return Pool_Config{
+			conn_config = integration_conn_config(t), // connect_fn nil => real conn_connect
+			min_conns = min_conns,
+			max_conns = max_conns,
+		}
+	}
+
+	@(test)
+	test_integration_pool_acquire_query_release :: proc(t: ^testing.T) {
+		pool, perr := pool_init(integration_pool_config(t, 1, 2), context.allocator)
+		testing.expectf(t, perr == nil, "expected pool_init success, got %v", perr)
+		if pool == nil {
+			testing.fail_now(t, "no pool")
+		}
+
+		conn, aerr := pool_acquire(pool, 5 * time.Second)
+		testing.expectf(t, aerr == nil, "expected acquire success, got %v", aerr)
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+		qerr := conn_query(conn, "SELECT 1;")
+		testing.expectf(t, qerr == nil, "expected query success, got %v", qerr)
+
+		rerr := pool_release(pool, conn)
+		testing.expectf(t, rerr == nil, "expected release success, got %v", rerr)
+
+		// Reuse: same physical connection comes back.
+		conn2, aerr2 := pool_acquire(pool, 5 * time.Second)
+		testing.expectf(t, aerr2 == nil, "expected re-acquire success, got %v", aerr2)
+		testing.expect(t, conn2 == conn, "expected pooled connection reuse")
+		testing.expect(t, pool_release(pool, conn2) == nil, "expected release success")
+
+		pool_destroy(pool)
+	}
+
+	@(test)
+	test_integration_pool_release_resets_real_transaction :: proc(t: ^testing.T) {
+		pool, perr := pool_init(integration_pool_config(t, 1, 1), context.allocator)
+		testing.expectf(t, perr == nil, "expected pool_init success, got %v", perr)
+		if pool == nil {
+			testing.fail_now(t, "no pool")
+		}
+
+		conn, aerr := pool_acquire(pool, 5 * time.Second)
+		testing.expectf(t, aerr == nil, "expected acquire success, got %v", aerr)
+
+		testing.expect(t, conn_query(conn, "BEGIN;") == nil, "expected BEGIN success")
+		testing.expect_value(t, conn.status, Conn_Status.In_Transaction)
+
+		// Release must issue a real ROLLBACK and pool the connection back.
+		testing.expect(t, pool_release(pool, conn) == nil, "expected release success")
+
+		conn2, aerr2 := pool_acquire(pool, 5 * time.Second)
+		testing.expectf(t, aerr2 == nil, "expected re-acquire success, got %v", aerr2)
+		testing.expect(t, conn2 == conn, "expected same connection back after reset")
+		testing.expect_value(t, conn2.status, Conn_Status.Ready)
+		testing.expect_value(t, conn2.transaction_status, pgproto.Transaction_Status.Idle)
+
+		testing.expect(t, pool_release(pool, conn2) == nil, "expected release success")
+		pool_destroy(pool)
+	}
+
+	Live_Stress_Worker :: struct {
+		pool:     ^Pool,
+		iters:    int,
+		failures: int,
+	}
+
+	live_stress_proc :: proc(w: ^Live_Stress_Worker) {
+		for _ in 0 ..< w.iters {
+			conn, err := pool_acquire(w.pool, 10 * time.Second)
+			if err != nil || conn == nil {
+				w.failures += 1
+				continue
+			}
+			if conn_query(conn, "SELECT 1;") != nil {
+				w.failures += 1
+			}
+			if pool_release(w.pool, conn) != nil {
+				w.failures += 1
+			}
+		}
+	}
+
+	@(test)
+	test_integration_pool_concurrent_live :: proc(t: ^testing.T) {
+		pool, perr := pool_init(integration_pool_config(t, 2, 4), context.allocator)
+		testing.expectf(t, perr == nil, "expected pool_init success, got %v", perr)
+		if pool == nil {
+			testing.fail_now(t, "no pool")
+		}
+
+		NUM_THREADS :: 16
+		ITERS :: 10
+
+		workers: [NUM_THREADS]Live_Stress_Worker
+		threads: [NUM_THREADS]^thread.Thread
+		for i in 0 ..< NUM_THREADS {
+			workers[i] = Live_Stress_Worker{pool = pool, iters = ITERS}
+			threads[i] = thread.create_and_start_with_poly_data(&workers[i], live_stress_proc)
+		}
+		for i in 0 ..< NUM_THREADS {
+			thread.join(threads[i])
+			thread.destroy(threads[i])
+		}
+
+		total_failures := 0
+		for i in 0 ..< NUM_THREADS {
+			total_failures += workers[i].failures
+		}
+		testing.expect_value(t, total_failures, 0)
+		testing.expect_value(t, len(pool.in_use), 0)
+
+		pool_destroy(pool)
+	}
+
 } // when OPG_INTEGRATION

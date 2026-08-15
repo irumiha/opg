@@ -22,6 +22,10 @@ package pgconn
 @(require) import "core:strings"
 @(require) import "core:sync"
 @(require) import "core:testing"
+@(require) import "core:thread"
+@(require) import "core:time"
+@(require) import "../pgerr"
+@(require) import "../pgproto"
 
 OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)
 
@@ -223,6 +227,137 @@ when OPG_INTEGRATION {
 		}
 		testing.expect_value(t, collector.command_tag, "SELECT 1")
 		testing.expect_value(t, conn.status, Conn_Status.Ready)
+	}
+
+	// ------------------------------------------------------------------------
+	// Shared test helpers
+	// ------------------------------------------------------------------------
+
+	/*
+		integration_connect connects to the integration database and fails the
+		test on any error. Callers must integration_disconnect the result.
+	*/
+	integration_connect :: proc(t: ^testing.T) -> ^Conn {
+		cfg := integration_conn_config(t)
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected successful connect, got %v", err)
+		if conn == nil {
+			testing.fail_now(t, "no connection")
+		}
+		return conn
+	}
+
+	integration_disconnect :: proc(conn: ^Conn) {
+		conn_close(conn)
+		free(conn, context.allocator)
+	}
+
+	integration_collector_destroy :: proc(collector: ^Test_Query_Collector) {
+		for r in collector.rows {
+			for s in r {
+				delete(s, context.allocator)
+			}
+			delete(r)
+		}
+		delete(collector.rows)
+		if len(collector.command_tag) > 0 {
+			delete(collector.command_tag, context.allocator)
+		}
+	}
+
+	// ------------------------------------------------------------------------
+	// Connection lifecycle & authentication
+	// ------------------------------------------------------------------------
+
+	@(test)
+	test_integration_auth_wrong_password :: proc(t: ^testing.T) {
+		cfg := integration_conn_config(t)
+		cfg.password = "definitely-wrong"
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expect(t, conn == nil, "expected nil conn on auth failure")
+		pg_err, ok := err.(pgerr.Postgres_Error)
+		testing.expectf(t, ok, "expected Postgres_Error, got %v", err)
+		if ok {
+			testing.expect_value(t, pg_err.code, "28P01") // invalid_password
+		}
+	}
+
+	@(test)
+	test_integration_unknown_database :: proc(t: ^testing.T) {
+		cfg := integration_conn_config(t)
+		cfg.database = "opg_no_such_db"
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expect(t, conn == nil, "expected nil conn for unknown database")
+		pg_err, ok := err.(pgerr.Postgres_Error)
+		testing.expectf(t, ok, "expected Postgres_Error, got %v", err)
+		if ok {
+			testing.expect_value(t, pg_err.code, "3D000") // invalid_catalog_name
+		}
+	}
+
+	@(test)
+	test_integration_server_parameters_and_appname :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		_, has_version := conn.parameters["server_version"]
+		testing.expect(t, has_version, "expected server_version parameter")
+		testing.expect_value(t, conn.parameters["client_encoding"], "UTF8")
+		testing.expect(t, conn.backend_pid > 0, "expected positive backend pid")
+		testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Idle)
+
+		// application_name from Conn_Config must be visible server-side.
+		collector: Test_Query_Collector
+		collector.allocator = context.allocator
+		collector.rows = make([dynamic][dynamic]string, context.allocator)
+		defer integration_collector_destroy(&collector)
+
+		qerr := conn_query(conn, "SHOW application_name;", test_on_row, test_on_command, test_on_desc, &collector)
+		testing.expectf(t, qerr == nil, "expected query success, got %v", qerr)
+		if len(collector.rows) == 1 && len(collector.rows[0]) == 1 {
+			testing.expect_value(t, collector.rows[0][0], "opg-integration")
+		} else {
+			testing.fail_now(t, "expected exactly one row from SHOW application_name")
+		}
+	}
+
+	Cancel_State :: struct {
+		conn: ^Conn,
+		err:  pgerr.Error,
+	}
+
+	cancel_after_delay_proc :: proc(s: ^Cancel_State) {
+		time.sleep(200 * time.Millisecond)
+		s.err = conn_cancel(s.conn)
+	}
+
+	@(test)
+	test_integration_cancel_running_query :: proc(t: ^testing.T) {
+		conn := integration_connect(t)
+		defer integration_disconnect(conn)
+
+		// conn_cancel only reads immutable fields (pid, secret, config), so
+		// running it from another thread while conn_query blocks is race-free.
+		state := Cancel_State{conn = conn}
+		th := thread.create_and_start_with_poly_data(&state, cancel_after_delay_proc)
+
+		qerr := conn_query(conn, "SELECT pg_sleep(30);")
+		thread.join(th)
+		thread.destroy(th)
+
+		testing.expectf(t, state.err == nil, "expected cancel request send success, got %v", state.err)
+		pg_err, ok := qerr.(pgerr.Postgres_Error)
+		testing.expectf(t, ok, "expected Postgres_Error from canceled query, got %v", qerr)
+		if ok {
+			testing.expect_value(t, pg_err.code, "57014") // query_canceled
+		}
+
+		// Connection must be fully usable afterward.
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		qerr2 := conn_query(conn, "SELECT 1;")
+		testing.expectf(t, qerr2 == nil, "expected query success after cancel, got %v", qerr2)
 	}
 
 } // when OPG_INTEGRATION

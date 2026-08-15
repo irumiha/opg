@@ -45,14 +45,15 @@ Conn :: struct {
 	config:             Conn_Config,
 	backend_pid:        i32,
 	backend_secret:     i32,
-	transaction_status: pgproto.Transaction_Status,
-	parameters:         map[string]string,
-	allocator:          mem.Allocator,
-	last_active:        time.Time,
-	on_notice:          Notice_Handler,
-	on_notice_data:     rawptr,
-	on_notification:    Notification_Handler,
-	on_notif_data:      rawptr,
+	transaction_status:  pgproto.Transaction_Status,
+	parameters:          map[string]string,
+	prepared_statements: map[string]Prepared_Statement,
+	allocator:           mem.Allocator,
+	last_active:         time.Time,
+	on_notice:           Notice_Handler,
+	on_notice_data:      rawptr,
+	on_notification:     Notification_Handler,
+	on_notif_data:       rawptr,
 }
 
 conn_is_alive :: proc(conn: ^Conn) -> bool {
@@ -73,6 +74,7 @@ conn_handshake :: proc(
 	c.config = config
 	c.status = .Connecting
 	c.parameters = make(map[string]string, 16, allocator)
+	c.prepared_statements = make(map[string]Prepared_Statement, 16, allocator)
 	c.on_notice = config.on_notice
 	c.on_notice_data = config.on_notice_data
 	c.on_notification = config.on_notification
@@ -236,6 +238,19 @@ conn_close :: proc(conn: ^Conn) {
 		}
 		delete(conn.parameters)
 		conn.parameters = nil
+	}
+
+	// Free prepared statements map
+	if conn.prepared_statements != nil {
+		for _, stmt in conn.prepared_statements {
+			delete(stmt.name, conn.allocator)
+			delete(stmt.query, conn.allocator)
+			if stmt.param_oids != nil {
+				delete(stmt.param_oids, conn.allocator)
+			}
+		}
+		delete(conn.prepared_statements)
+		conn.prepared_statements = nil
 	}
 
 	conn.status = .Closed

@@ -173,6 +173,14 @@ conn_prepare :: proc(
 			conn.last_active = time.now()
 
 			if var_recorded_err == nil && conn.prepared_statements != nil {
+				name_clone := strings.clone(name, conn.allocator)
+				query_clone := strings.clone(query, conn.allocator)
+				var oids_clone: []u32 = nil
+				if param_oids != nil {
+					oids_clone = make([]u32, len(param_oids), conn.allocator)
+					copy(oids_clone, param_oids)
+				}
+
 				if old_stmt, exists := conn.prepared_statements[name]; exists {
 					delete(old_stmt.name, conn.allocator)
 					delete(old_stmt.query, conn.allocator)
@@ -181,13 +189,7 @@ conn_prepare :: proc(
 					}
 					delete_key(&conn.prepared_statements, name)
 				}
-				name_clone := strings.clone(name, conn.allocator)
-				query_clone := strings.clone(query, conn.allocator)
-				oids_clone: []u32 = nil
-				if param_oids != nil {
-					oids_clone = make([]u32, len(param_oids), conn.allocator)
-					copy(oids_clone, param_oids)
-				}
+
 				conn.prepared_statements[name_clone] = Prepared_Statement{
 					name = name_clone,
 					query = query_clone,

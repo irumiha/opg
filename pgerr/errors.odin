@@ -35,6 +35,7 @@ Protocol_Error_Type :: enum {
 	Malformed_Packet,
 	Invalid_Length,
 	Unknown_Message_Type,
+	Unknown_Auth_Type,
 	Unexpected_Message,
 	Buffer_Underflow,
 	Invalid_Column_Count,

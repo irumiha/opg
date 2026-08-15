@@ -78,9 +78,14 @@ parse_authentication :: proc(
 		rem_bytes, _ := reader_read_bytes(&r, rem)
 		msg.sasl_data = string(rem_bytes)
 		return msg, nil
-	}
 
-	return msg, nil
+	case:
+		return {}, pgerr.Protocol_Error{
+			type = .Unknown_Auth_Type,
+			message = "Unrecognized authentication type code",
+			byte_offset = 0,
+		}
+	}
 }
 
 /*
@@ -216,6 +221,13 @@ parse_row_description :: proc(
 			return {}, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Truncated field description in RowDescription",
+				byte_offset = r.offset,
+			}
+		}
+		if fmt_code != 0 && fmt_code != 1 {
+			return {}, pgerr.Protocol_Error{
+				type = .Unsupported_Format_Code,
+				message = "Field format code must be 0 (text) or 1 (binary)",
 				byte_offset = r.offset,
 			}
 		}
@@ -520,6 +532,13 @@ parse_copy_response :: proc(
 			byte_offset = 0,
 		}
 	}
+	if fmt_byte != 0 && fmt_byte != 1 {
+		return .Text, nil, pgerr.Protocol_Error{
+			type = .Unsupported_Format_Code,
+			message = "Overall copy format must be 0 (text) or 1 (binary)",
+			byte_offset = 0,
+		}
+	}
 	overall_format = Field_Format(fmt_byte)
 
 	num_cols, ok_num := reader_read_i16(&r)
@@ -552,6 +571,13 @@ parse_copy_response :: proc(
 			return .Text, nil, pgerr.Protocol_Error{
 				type = .Malformed_Packet,
 				message = "Truncated column format code in CopyResponse",
+				byte_offset = r.offset,
+			}
+		}
+		if col_fmt != 0 && col_fmt != 1 {
+			return .Text, nil, pgerr.Protocol_Error{
+				type = .Unsupported_Format_Code,
+				message = "Column copy format code must be 0 (text) or 1 (binary)",
 				byte_offset = r.offset,
 			}
 		}
@@ -708,14 +734,15 @@ parse_message :: proc(
 		}
 	}
 
-	total_msg_len := 1 + int(payload_len_i32)
-	if len(data) < total_msg_len {
+	// Compare in i64 so a length of max(i32) cannot overflow int on 32-bit targets.
+	if i64(len(data)) < i64(payload_len_i32) + 1 {
 		return nil, 0, pgerr.Protocol_Error{
 			type = .Buffer_Underflow,
 			message = "Incomplete packet payload received",
 			byte_offset = len(data),
 		}
 	}
+	total_msg_len := 1 + int(payload_len_i32)
 
 	payload := data[5:total_msg_len]
 

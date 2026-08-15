@@ -811,3 +811,65 @@ test_parse_malformed_and_underflow_packets :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_parse_authentication_unknown_code :: proc(t: ^testing.T) {
+	// Auth code 4 (obsolete crypt password) is not a recognized Auth_Type.
+	pkt := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 4}
+	msg, n, err := parse_message(pkt)
+	testing.expect(t, msg == nil, "expected nil message for unknown auth code")
+	testing.expect_value(t, n, 0)
+	p_err, is_proto := err.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto, "expected Protocol_Error")
+	testing.expect_value(t, p_err.type, pgerr.Protocol_Error_Type.Unknown_Auth_Type)
+
+	pkt_hi := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 99}
+	_, _, err_hi := parse_message(pkt_hi)
+	p_err_hi, is_proto_hi := err_hi.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto_hi, "expected Protocol_Error")
+	testing.expect_value(t, p_err_hi.type, pgerr.Protocol_Error_Type.Unknown_Auth_Type)
+}
+
+@(test)
+test_parse_unsupported_format_codes :: proc(t: ^testing.T) {
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// 1. RowDescription field with format code 7
+	pos := write_packet_header(&buf, 'T')
+	write_i16(&buf, 1)
+	write_string_nt(&buf, "id")
+	write_u32(&buf, 0)
+	write_i16(&buf, 0)
+	write_u32(&buf, 23)
+	write_i16(&buf, 4)
+	write_i32(&buf, -1)
+	write_i16(&buf, 7) // invalid: only 0 (text) and 1 (binary) exist
+	finish_packet(&buf, pos)
+	_, _, err_rd := parse_message(buf[:])
+	p_rd, is_rd := err_rd.(pgerr.Protocol_Error)
+	testing.expect(t, is_rd, "expected Protocol_Error for RowDescription format code")
+	testing.expect_value(t, p_rd.type, pgerr.Protocol_Error_Type.Unsupported_Format_Code)
+
+	// 2. CopyInResponse with invalid overall format 2
+	clear(&buf)
+	pos = write_packet_header(&buf, 'G')
+	write_u8(&buf, 2)
+	write_i16(&buf, 0)
+	finish_packet(&buf, pos)
+	_, _, err_ov := parse_message(buf[:])
+	p_ov, is_ov := err_ov.(pgerr.Protocol_Error)
+	testing.expect(t, is_ov, "expected Protocol_Error for overall copy format")
+	testing.expect_value(t, p_ov.type, pgerr.Protocol_Error_Type.Unsupported_Format_Code)
+
+	// 3. CopyOutResponse with invalid column format code 9
+	clear(&buf)
+	pos = write_packet_header(&buf, 'H')
+	write_u8(&buf, 0)
+	write_i16(&buf, 1)
+	write_i16(&buf, 9)
+	finish_packet(&buf, pos)
+	_, _, err_col := parse_message(buf[:])
+	p_col, is_col := err_col.(pgerr.Protocol_Error)
+	testing.expect(t, is_col, "expected Protocol_Error for column copy format")
+	testing.expect_value(t, p_col.type, pgerr.Protocol_Error_Type.Unsupported_Format_Code)
+}

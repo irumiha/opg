@@ -758,3 +758,79 @@ test_parse_extended_and_copy_edge_cases :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_parse_malformed_and_underflow_packets :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// 1. Header underflow (< 5 bytes)
+	_, _, err1 := parse_message([]byte{'Z', 0, 0})
+	p_err1, ok1 := err1.(opg.Protocol_Error)
+	testing.expect(t, ok1, "expected Protocol_Error")
+	testing.expect_value(t, p_err1.type, opg.Protocol_Error_Type.Buffer_Underflow)
+
+	// 2. Invalid length header (< 4)
+	_, _, err2 := parse_message([]byte{'Z', 0, 0, 0, 2, 'I'})
+	p_err2, ok2 := err2.(opg.Protocol_Error)
+	testing.expect(t, ok2, "expected Protocol_Error")
+	testing.expect_value(t, p_err2.type, opg.Protocol_Error_Type.Invalid_Length)
+
+	// 3. Payload underflow
+	_, _, err3 := parse_message([]byte{'Z', 0, 0, 0, 10, 'I'})
+	p_err3, ok3 := err3.(opg.Protocol_Error)
+	testing.expect(t, ok3, "expected Protocol_Error")
+	testing.expect_value(t, p_err3.type, opg.Protocol_Error_Type.Buffer_Underflow)
+
+	// 4. Unknown message type
+	_, _, err4 := parse_message([]byte{'?', 0, 0, 0, 4})
+	p_err4, ok4 := err4.(opg.Protocol_Error)
+	testing.expect(t, ok4, "expected Protocol_Error")
+	testing.expect_value(t, p_err4.type, opg.Protocol_Error_Type.Unknown_Message_Type)
+
+	// 5. Malformed ReadyForQuery (payload length 0)
+	_, _, err5 := parse_message([]byte{'Z', 0, 0, 0, 4})
+	p_err5, ok5 := err5.(opg.Protocol_Error)
+	testing.expect(t, ok5, "expected Protocol_Error")
+	testing.expect_value(t, p_err5.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	// 6. Invalid ReadyForQuery status character (not 'I', 'T', 'E')
+	_, _, err6 := parse_message([]byte{'Z', 0, 0, 0, 5, 'X'})
+	p_err6, ok6 := err6.(opg.Protocol_Error)
+	testing.expect(t, ok6, "expected Protocol_Error")
+	testing.expect_value(t, p_err6.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	// 7. Authentication payload too short (< 4 bytes for auth type)
+	_, _, err7 := parse_message([]byte{'R', 0, 0, 0, 6, 0, 0})
+	p_err7, ok7 := err7.(opg.Protocol_Error)
+	testing.expect(t, ok7, "expected Protocol_Error")
+	testing.expect_value(t, p_err7.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	// 8. Authentication MD5 missing salt (< 4 bytes salt)
+	_, _, err8 := parse_message([]byte{'R', 0, 0, 0, 10, 0, 0, 0, 5, 1, 2})
+	p_err8, ok8 := err8.(opg.Protocol_Error)
+	testing.expect(t, ok8, "expected Protocol_Error")
+	testing.expect_value(t, p_err8.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	// 9. Authentication SASL unterminated mechanism string
+	_, _, err9 := parse_message([]byte{'R', 0, 0, 0, 13, 0, 0, 0, 10, 'S', 'C', 'R', 'A', 'M'})
+	p_err9, ok9 := err9.(opg.Protocol_Error)
+	testing.expect(t, ok9, "expected Protocol_Error")
+	testing.expect_value(t, p_err9.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	// 10. BackendKeyData too short (< 8 bytes payload)
+	_, _, err10 := parse_message([]byte{'K', 0, 0, 0, 8, 0, 0, 0, 1})
+	p_err10, ok10 := err10.(opg.Protocol_Error)
+	testing.expect(t, ok10, "expected Protocol_Error")
+	testing.expect_value(t, p_err10.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	// 11. ParameterStatus malformed / unterminated strings
+	_, _, err11 := parse_message([]byte{'S', 0, 0, 0, 8, 'k', 'e', 'y', 0})
+	p_err11, ok11 := err11.(opg.Protocol_Error)
+	testing.expect(t, ok11, "expected Protocol_Error")
+	testing.expect_value(t, p_err11.type, opg.Protocol_Error_Type.Malformed_Packet)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+

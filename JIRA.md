@@ -103,7 +103,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-103] Backend Wire Messages Decoding (Server $\rightarrow$ Client)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgproto`
 - **Files**:
   - `pgproto/parser.odin`

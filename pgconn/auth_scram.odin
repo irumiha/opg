@@ -5,11 +5,13 @@ import "core:crypto/hash"
 import "core:crypto/hmac"
 import "core:crypto/pbkdf2"
 import "core:encoding/base64"
+import "core:mem"
 import "core:strconv"
 import "core:strings"
 import "../pgerr"
 
 Scram_State :: struct {
+	allocator:         mem.Allocator,
 	client_nonce:      string,
 	combined_nonce:    string,
 	salt:              []byte,
@@ -18,6 +20,42 @@ Scram_State :: struct {
 	server_first:      string,
 	auth_message:      string,
 	server_signature:  [32]byte,
+}
+
+/*
+	scram_state_init initializes a Scram_State struct with a persistent allocator.
+*/
+scram_state_init :: proc(state: ^Scram_State, allocator := context.allocator) {
+	state^ = Scram_State{
+		allocator = allocator,
+	}
+}
+
+/*
+	scram_state_destroy frees all dynamically allocated memory in Scram_State using its allocator.
+*/
+scram_state_destroy :: proc(state: ^Scram_State) {
+	if state == nil do return
+	alloc := state.allocator.procedure != nil ? state.allocator : context.allocator
+	if len(state.client_nonce) > 0 {
+		delete(state.client_nonce, alloc)
+	}
+	if len(state.combined_nonce) > 0 {
+		delete(state.combined_nonce, alloc)
+	}
+	if len(state.salt) > 0 {
+		delete(state.salt, alloc)
+	}
+	if len(state.client_first_bare) > 0 {
+		delete(state.client_first_bare, alloc)
+	}
+	if len(state.server_first) > 0 {
+		delete(state.server_first, alloc)
+	}
+	if len(state.auth_message) > 0 {
+		delete(state.auth_message, alloc)
+	}
+	state^ = {}
 }
 
 /*
@@ -50,20 +88,22 @@ scram_client_first :: proc(
 	client_first_msg: string,
 	err: pgerr.Error,
 ) {
+	state_alloc := state.allocator.procedure != nil ? state.allocator : context.allocator
+
 	if len(injected_nonce) > 0 {
-		state.client_nonce = strings.clone(injected_nonce, allocator)
+		state.client_nonce = strings.clone(injected_nonce, state_alloc)
 	} else {
 		// Generate 24 random bytes -> 32 base64 characters
 		raw_nonce: [24]byte
 		crypto.rand_bytes(raw_nonce[:])
-		b64_nonce := base64.encode(raw_nonce[:], allocator = allocator)
+		b64_nonce := base64.encode(raw_nonce[:], allocator = state_alloc)
 		state.client_nonce = b64_nonce
 	}
 
 	escaped_user := scram_escape_username(user, context.temp_allocator)
 
 	// client-first-message-bare = "n=" + escaped_user + ",r=" + client_nonce
-	bare_builder := strings.builder_make(allocator)
+	bare_builder := strings.builder_make(state_alloc)
 	strings.write_string(&bare_builder, "n=")
 	strings.write_string(&bare_builder, escaped_user)
 	strings.write_string(&bare_builder, ",r=")
@@ -143,24 +183,26 @@ scram_client_final :: proc(
 	client_final_msg: string,
 	err: pgerr.Error,
 ) {
-	r_nonce, salt, iterations, parse_err := scram_parse_server_first(server_first_msg, allocator)
+	state_alloc := state.allocator.procedure != nil ? state.allocator : context.allocator
+
+	r_nonce, salt, iterations, parse_err := scram_parse_server_first(server_first_msg, state_alloc)
 	if parse_err != nil {
 		return "", parse_err
 	}
 
 	// Verify server nonce begins with client nonce
 	if !strings.has_prefix(r_nonce, state.client_nonce) {
-		delete(salt, allocator)
+		delete(salt, state_alloc)
 		return "", pgerr.Auth_Error{
 			type = .SCRAM_Invalid_Server_First_Message,
 			message = "Server nonce does not match client nonce",
 		}
 	}
 
-	state.combined_nonce = strings.clone(r_nonce, allocator)
+	state.combined_nonce = strings.clone(r_nonce, state_alloc)
 	state.salt = salt
 	state.iterations = iterations
-	state.server_first = strings.clone(server_first_msg, allocator)
+	state.server_first = strings.clone(server_first_msg, state_alloc)
 
 	// client-final-message-without-proof = "c=biws,r=" + combined_nonce
 	client_final_without_proof := strings.concatenate(
@@ -171,7 +213,7 @@ scram_client_final :: proc(
 	// auth-message = client-first-message-bare + "," + server-first + "," + client-final-message-without-proof
 	state.auth_message = strings.concatenate(
 		{state.client_first_bare, ",", state.server_first, ",", client_final_without_proof},
-		allocator,
+		state_alloc,
 	)
 
 	// SaltedPassword = PBKDF2-HMAC-SHA256(password, salt, iterations)
@@ -226,6 +268,7 @@ scram_verify_server_final :: proc(
 	server_final_msg: string,
 	allocator := context.temp_allocator,
 ) -> pgerr.Error {
+	state_alloc := state != nil && state.allocator.procedure != nil ? state.allocator : context.allocator
 	parts := strings.split(server_final_msg, ",", context.temp_allocator)
 	var_v_b64 := ""
 
@@ -235,7 +278,7 @@ scram_verify_server_final :: proc(
 		} else if len(part) >= 2 && part[0] == 'e' && part[1] == '=' {
 			return pgerr.Auth_Error{
 				type = .Authentication_Failed,
-				message = strings.clone(part[2:], allocator),
+				message = strings.clone(part[2:], state_alloc),
 			}
 		}
 	}
@@ -247,7 +290,8 @@ scram_verify_server_final :: proc(
 		}
 	}
 
-	decoded_sig, decode_err := base64.decode(var_v_b64, allocator = context.temp_allocator)
+	decoded_sig, decode_err := base64.decode(var_v_b64, allocator = allocator)
+	defer delete(decoded_sig, allocator)
 	if decode_err != nil || len(decoded_sig) != 32 {
 		return pgerr.Auth_Error{
 			type = .SCRAM_Invalid_Server_Final_Message,
@@ -272,4 +316,3 @@ scram_verify_server_final :: proc(
 
 	return nil
 }
-

@@ -58,18 +58,20 @@ test_auth_scram_client_first_rfc7677 :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	state: Scram_State
-	msg, err := scram_client_first(&state, "user", injected_nonce = "rOprNGfwEbeRWgbNEkqO", allocator = context.allocator)
+	{
+		state: Scram_State
+		scram_state_init(&state, context.allocator)
+		defer scram_state_destroy(&state)
 
-	testing.expect(t, err == nil, "expected scram_client_first success")
-	// RFC 7677 Client First message: "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
-	testing.expect_value(t, msg, "n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
-	testing.expect_value(t, state.client_nonce, "rOprNGfwEbeRWgbNEkqO")
-	testing.expect_value(t, state.client_first_bare, "n=user,r=rOprNGfwEbeRWgbNEkqO")
+		msg, err := scram_client_first(&state, "user", injected_nonce = "rOprNGfwEbeRWgbNEkqO", allocator = context.allocator)
+		defer delete(msg, context.allocator)
 
-	delete(msg, context.allocator)
-	delete(state.client_nonce, context.allocator)
-	delete(state.client_first_bare, context.allocator)
+		testing.expect(t, err == nil, "expected scram_client_first success")
+		// RFC 7677 Client First message: "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+		testing.expect_value(t, msg, "n,,n=user,r=rOprNGfwEbeRWgbNEkqO")
+		testing.expect_value(t, state.client_nonce, "rOprNGfwEbeRWgbNEkqO")
+		testing.expect_value(t, state.client_first_bare, "n=user,r=rOprNGfwEbeRWgbNEkqO")
+	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -81,16 +83,18 @@ test_auth_scram_client_first_random_nonce :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	state: Scram_State
-	msg, err := scram_client_first(&state, "postgres", allocator = context.allocator)
+	{
+		state: Scram_State
+		scram_state_init(&state, context.allocator)
+		defer scram_state_destroy(&state)
 
-	testing.expect(t, err == nil, "expected scram_client_first success")
-	testing.expect(t, len(state.client_nonce) >= 24, "expected random nonce length >= 24")
-	testing.expect(t, strings.has_prefix(msg, "n,,n=postgres,r="), "expected valid client first prefix")
+		msg, err := scram_client_first(&state, "postgres", allocator = context.allocator)
+		defer delete(msg, context.allocator)
 
-	delete(msg, context.allocator)
-	delete(state.client_nonce, context.allocator)
-	delete(state.client_first_bare, context.allocator)
+		testing.expect(t, err == nil, "expected scram_client_first success")
+		testing.expect(t, len(state.client_nonce) >= 24, "expected random nonce length >= 24")
+		testing.expect(t, strings.has_prefix(msg, "n,,n=postgres,r="), "expected valid client first prefix")
+	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -102,33 +106,31 @@ test_auth_scram_client_final_rfc7677 :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	state: Scram_State
-	client_first, first_err := scram_client_first(
-		&state,
-		"user",
-		injected_nonce = "rOprNGfwEbeRWgbNEkqO",
-		allocator = context.allocator,
-	)
-	testing.expect(t, first_err == nil, "expected scram_client_first success")
+	{
+		state: Scram_State
+		scram_state_init(&state, context.allocator)
+		defer scram_state_destroy(&state)
 
-	server_first := "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
-	client_final, err := scram_client_final(&state, server_first, "pencil", allocator = context.allocator)
+		client_first, first_err := scram_client_first(
+			&state,
+			"user",
+			injected_nonce = "rOprNGfwEbeRWgbNEkqO",
+			allocator = context.allocator,
+		)
+		defer delete(client_first, context.allocator)
+		testing.expect(t, first_err == nil, "expected scram_client_first success")
 
-	testing.expect(t, err == nil, "expected scram_client_final success")
+		server_first := "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+		client_final, err := scram_client_final(&state, server_first, "pencil", allocator = context.allocator)
+		defer delete(client_final, context.allocator)
 
-	// RFC 7677 Expected Client Final:
-	// "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
-	expected_client_final := "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
-	testing.expect_value(t, client_final, expected_client_final)
+		testing.expect(t, err == nil, "expected scram_client_final success")
 
-	delete(client_first, context.allocator)
-	delete(state.client_nonce, context.allocator)
-	delete(state.client_first_bare, context.allocator)
-	delete(client_final, context.allocator)
-	delete(state.combined_nonce, context.allocator)
-	delete(state.server_first, context.allocator)
-	delete(state.auth_message, context.allocator)
-	delete(state.salt, context.allocator)
+		// RFC 7677 Expected Client Final:
+		// "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+		expected_client_final := "c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+		testing.expect_value(t, client_final, expected_client_final)
+	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -189,29 +191,31 @@ test_auth_scram_client_final_nonce_mismatch :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	state: Scram_State
-	client_first, first_err := scram_client_first(
-		&state,
-		"user",
-		injected_nonce = "clientNonce123",
-		allocator = context.allocator,
-	)
-	testing.expect(t, first_err == nil, "expected scram_client_first success")
+	{
+		state: Scram_State
+		scram_state_init(&state, context.allocator)
+		defer scram_state_destroy(&state)
 
-	// Server returns completely different nonce that doesn't start with clientNonce123
-	server_first := "r=differentNonce456,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
-	_, err := scram_client_final(&state, server_first, "pencil", allocator = context.allocator)
-	testing.expect(t, err != nil, "expected error on nonce mismatch")
-	#partial switch aerr in err {
-	case pgerr.Auth_Error:
-		testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.SCRAM_Invalid_Server_First_Message)
-	case:
-		testing.expect(t, false, "expected Auth_Error")
+		client_first, first_err := scram_client_first(
+			&state,
+			"user",
+			injected_nonce = "clientNonce123",
+			allocator = context.allocator,
+		)
+		defer delete(client_first, context.allocator)
+		testing.expect(t, first_err == nil, "expected scram_client_first success")
+
+		// Server returns completely different nonce that doesn't start with clientNonce123
+		server_first := "r=differentNonce456,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+		_, err := scram_client_final(&state, server_first, "pencil", allocator = context.allocator)
+		testing.expect(t, err != nil, "expected error on nonce mismatch")
+		#partial switch aerr in err {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, aerr.type, pgerr.Auth_Error_Type.SCRAM_Invalid_Server_First_Message)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
 	}
-
-	delete(client_first, context.allocator)
-	delete(state.client_nonce, context.allocator)
-	delete(state.client_first_bare, context.allocator)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -223,77 +227,102 @@ test_auth_scram_verify_server_final_rfc7677 :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	state: Scram_State
-	client_first, first_err := scram_client_first(
-		&state,
-		"user",
-		injected_nonce = "rOprNGfwEbeRWgbNEkqO",
-		allocator = context.allocator,
-	)
-	testing.expect(t, first_err == nil, "expected scram_client_first success")
+	{
+		state: Scram_State
+		scram_state_init(&state, context.allocator)
+		defer scram_state_destroy(&state)
 
-	server_first := "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
-	client_final, final_err := scram_client_final(&state, server_first, "pencil", allocator = context.allocator)
-	testing.expect(t, final_err == nil, "expected scram_client_final success")
+		client_first, first_err := scram_client_first(
+			&state,
+			"user",
+			injected_nonce = "rOprNGfwEbeRWgbNEkqO",
+			allocator = context.allocator,
+		)
+		defer delete(client_first, context.allocator)
+		testing.expect(t, first_err == nil, "expected scram_client_first success")
 
-	// RFC 7677 Expected Server Final: "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
-	server_final := "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
-	err := scram_verify_server_final(&state, server_final, allocator = context.allocator)
-	testing.expect(t, err == nil, "expected valid server final verification")
+		server_first := "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096"
+		client_final, final_err := scram_client_final(&state, server_first, "pencil", allocator = context.allocator)
+		defer delete(client_final, context.allocator)
+		testing.expect(t, final_err == nil, "expected scram_client_final success")
 
-	// Verify tampered signature fails
-	tampered_server_final := "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-	bad_err := scram_verify_server_final(&state, tampered_server_final, allocator = context.allocator)
-	testing.expect(t, bad_err != nil, "expected error on tampered signature")
-	#partial switch auth_err in bad_err {
-	case pgerr.Auth_Error:
-		testing.expect_value(t, auth_err.type, pgerr.Auth_Error_Type.SCRAM_Server_Signature_Mismatch)
-	case:
-		testing.expect(t, false, "expected Auth_Error")
+		// RFC 7677 Expected Server Final: "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+		server_final := "v=6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+		err := scram_verify_server_final(&state, server_final, allocator = context.allocator)
+		testing.expect(t, err == nil, "expected valid server final verification")
+
+		// Verify tampered signature fails
+		tampered_server_final := "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+		bad_err := scram_verify_server_final(&state, tampered_server_final, allocator = context.allocator)
+		testing.expect(t, bad_err != nil, "expected error on tampered signature")
+		#partial switch auth_err in bad_err {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, auth_err.type, pgerr.Auth_Error_Type.SCRAM_Server_Signature_Mismatch)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
+
+		// Server error (e=...)
+		err_server_final := "e=other-error"
+		err_res := scram_verify_server_final(&state, err_server_final, allocator = context.allocator)
+		testing.expect(t, err_res != nil, "expected error on server error message")
+		#partial switch e in err_res {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, e.type, pgerr.Auth_Error_Type.Authentication_Failed)
+			delete(e.message, state.allocator)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
+
+		// Missing v= signature
+		missing_v := "r=some-nonce"
+		missing_err := scram_verify_server_final(&state, missing_v, allocator = context.allocator)
+		testing.expect(t, missing_err != nil, "expected error on missing v=")
+		#partial switch e in missing_err {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, e.type, pgerr.Auth_Error_Type.SCRAM_Invalid_Server_Final_Message)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
+
+		// Malformed base64
+		bad_b64 := "v=invalid!base64"
+		bad_b64_err := scram_verify_server_final(&state, bad_b64, allocator = context.allocator)
+		testing.expect(t, bad_b64_err != nil, "expected error on bad base64")
+		#partial switch e in bad_b64_err {
+		case pgerr.Auth_Error:
+			testing.expect_value(t, e.type, pgerr.Auth_Error_Type.SCRAM_Invalid_Server_Final_Message)
+		case:
+			testing.expect(t, false, "expected Auth_Error")
+		}
 	}
 
-	// Server error (e=...)
-	err_server_final := "e=other-error"
-	err_res := scram_verify_server_final(&state, err_server_final, allocator = context.allocator)
-	testing.expect(t, err_res != nil, "expected error on server error message")
-	#partial switch e in err_res {
-	case pgerr.Auth_Error:
-		testing.expect_value(t, e.type, pgerr.Auth_Error_Type.Authentication_Failed)
-		delete(e.message, context.allocator)
-	case:
-		testing.expect(t, false, "expected Auth_Error")
-	}
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
 
-	// Missing v= signature
-	missing_v := "r=some-nonce"
-	missing_err := scram_verify_server_final(&state, missing_v, allocator = context.allocator)
-	testing.expect(t, missing_err != nil, "expected error on missing v=")
-	#partial switch e in missing_err {
-	case pgerr.Auth_Error:
-		testing.expect_value(t, e.type, pgerr.Auth_Error_Type.SCRAM_Invalid_Server_Final_Message)
-	case:
-		testing.expect(t, false, "expected Auth_Error")
-	}
+@(test)
+test_auth_scram_state_destroy_safety :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
 
-	// Malformed base64
-	bad_b64 := "v=invalid!base64"
-	bad_b64_err := scram_verify_server_final(&state, bad_b64, allocator = context.allocator)
-	testing.expect(t, bad_b64_err != nil, "expected error on bad base64")
-	#partial switch e in bad_b64_err {
-	case pgerr.Auth_Error:
-		testing.expect_value(t, e.type, pgerr.Auth_Error_Type.SCRAM_Invalid_Server_Final_Message)
-	case:
-		testing.expect(t, false, "expected Auth_Error")
-	}
+	{
+		// 1. Nil safety
+		scram_state_destroy(nil)
 
-	delete(client_first, context.allocator)
-	delete(state.client_nonce, context.allocator)
-	delete(state.client_first_bare, context.allocator)
-	delete(client_final, context.allocator)
-	delete(state.combined_nonce, context.allocator)
-	delete(state.server_first, context.allocator)
-	delete(state.auth_message, context.allocator)
-	delete(state.salt, context.allocator)
+		// 2. Uninitialized / empty state
+		empty_state: Scram_State
+		scram_state_destroy(&empty_state)
+
+		// 3. Initialized but unused state
+		init_state: Scram_State
+		scram_state_init(&init_state, context.allocator)
+		scram_state_destroy(&init_state)
+
+		// 4. Double destroy safety (idempotent)
+		scram_state_destroy(&init_state)
+	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
@@ -396,14 +425,8 @@ test_auth_handle_challenge_sasl_full_conversation :: proc(t: ^testing.T) {
 		defer stream_destroy(&stream)
 
 		state: Scram_State
-		defer {
-			delete(state.client_nonce, context.allocator)
-			delete(state.client_first_bare, context.allocator)
-			delete(state.combined_nonce, context.allocator)
-			delete(state.server_first, context.allocator)
-			delete(state.auth_message, context.allocator)
-			delete(state.salt, context.allocator)
-		}
+		scram_state_init(&state, context.allocator)
+		defer scram_state_destroy(&state)
 
 		// 1. Server offers SASL mechanisms
 		auth_sasl := pgproto.Msg_Authentication{

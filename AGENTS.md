@@ -41,11 +41,21 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
 
 5. **Tagged Union Error Handling**:
    - **NEVER** return raw booleans or generic error strings.
-   - All errors must be modeled in the overarching tagged union `Error` defined in `root.odin`:
+   - All errors must be modeled in the overarching tagged union `Error` defined in the leaf
+     package `pgerr` and re-exported by `root.odin`. Subpackages import `pgerr` — never the
+     root package, which would create an import cycle once the root facade imports them:
      - `Net_Error`: Sockets, timeouts, disconnections, DNS resolution failures.
      - `Protocol_Error`: Malformed byte packets, invalid lengths, buffer underflows, unsupported protocol versions.
      - `Auth_Error`: SCRAM-SHA-256 validation errors, signature mismatches, bad credentials.
      - `Postgres_Error`: Server-side SQLSTATE errors and message fields (`ErrorResponse`).
+
+6. **Zero-Copy Borrowing Contract (`pgproto`)**:
+   - Parsed backend messages BORROW from the input packet buffer: strings and
+     `[]byte` fields are views into the `data` slice given to `parse_message`.
+   - Only container slices (`fields`, `values`, `mechanisms`, `param_oids`,
+     format-code slices) are allocated via the `allocator` parameter.
+   - Anything that must outlive the next socket read MUST be cloned:
+     `pgproto.parameter_status_clone`, `pgerr.postgres_error_clone`.
 
 ---
 
@@ -109,6 +119,7 @@ All code written in this repository must conform to standard Odin practices and 
 odin check . -no-entry-point
 
 # Check individual subpackages
+odin check pgerr -no-entry-point
 odin check pgproto -no-entry-point
 odin check pgconn -no-entry-point
 odin check pgorm -no-entry-point
@@ -116,17 +127,18 @@ odin check pgorm -no-entry-point
 
 ### Running Tests
 ```bash
-# Run all tests across all packages
-odin test . -all-packages
+# Run all tests across all packages via the tests/ aggregator package.
+# MUST be run from the repo root: golden fixture paths are cwd-relative.
+odin test tests -all-packages
 
 # Run tests with strict style and linter vetting
-odin test . -all-packages -vet -strict-style
+odin test tests -all-packages -vet -strict-style
 
 # Run tests for a specific subpackage
 odin test pgproto
 
 # Keep test executable for external inspection
-odin test . -keep-executable -out:build/tests.bin
+odin test tests -all-packages -keep-executable -out:build/tests.bin
 ```
 
 ### Memory Tracking & Leak Detection
@@ -155,7 +167,7 @@ test_parser_no_leaks :: proc(t: ^testing.T) {
 Detect memory corruption, data races, and out-of-bounds access:
 ```bash
 # Address Sanitizer (ASan)
-odin test . -all-packages -sanitize:address
+odin test tests -all-packages -sanitize:address
 
 # Thread Sanitizer (TSan) for pool concurrency testing
 odin test pgconn -sanitize:thread

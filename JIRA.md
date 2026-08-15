@@ -146,8 +146,10 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 - **Acceptance Criteria**:
   - Bit-for-bit validation of serialization and deserialization.
   - Fuzzing / malformed input tests (truncated packets, negative lengths, missing null terminators).
-  - Line coverage and branch coverage individually $\ge 95\%$ on `pgproto`.
-  - Zero memory leaks verified via `core:mem.Tracking_Allocator`.
+  - Every message variant, every parser error return, and every encoder has an explicit test
+    (Odin has no coverage tooling; enumerate, don't estimate).
+  - Zero memory leaks verified via `core:mem.Tracking_Allocator`, including parser error paths
+    driven with a tracked allocator.
 
 ---
 
@@ -439,6 +441,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 - **Acceptance Criteria**:
   - High concurrency stress test (100 concurrent workers querying pool).
   - Large dataset streaming test (querying 100k+ rows without memory explosion).
-  - Verification: `odin test . -all-packages -vet -strict-style` passes.
-  - Verification: `odin test . -all-packages -sanitize:address` passes.
-  - Final coverage audit: Line coverage $\ge 95\%$, branch coverage $\ge 95\%$.
+  - Verification: `odin test tests -all-packages -vet -strict-style` passes (run from the repo root).
+  - Verification: `odin test tests -all-packages -sanitize:address` passes.
+  - Final audit: every message variant, error path, and public procedure has an explicit test
+    (Odin has no coverage tooling; enumerate, don't estimate).

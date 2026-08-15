@@ -1,16 +1,27 @@
 # PostgreSQL Protocol 3.0 Golden Test Vectors
 
-This directory contains raw binary byte captures of PostgreSQL Frontend/Backend Protocol 3.0 messages for unit testing the `pgproto` parser and serializer without requiring a running database server.
+Raw binary captures of PostgreSQL Frontend/Backend Protocol 3.0 messages used by
+`pgproto/golden_test.odin` for bit-accurate, zero-network codec verification.
 
-## Vector Structure
+## Packet framing
 
-Postgres Backend messages follow the standard packet format:
-- `1 byte`: Message Type (`'R'`, `'Z'`, `'T'`, `'D'`, `'E'`, `'C'`, etc.)
-- `4 bytes`: Big-Endian `i32` length of payload including the 4 length bytes (excluding the 1 identifier byte)
-- `N bytes`: Message-specific payload
+- Typed messages: `1 byte` message type + `4 byte` big-endian i32 length
+  (length includes its own 4 bytes, excludes the type byte) + payload.
+- Untyped startup-family messages (`fe_startup_message`, `fe_ssl_request`,
+  `fe_cancel_request`): `4 byte` length + payload, no type byte.
 
-## Included Test Fixtures
+## Naming convention
 
-- `ready_for_query_idle.bin`: `Z` packet (5 bytes: `5a 00 00 00 05 49` -> `ReadyForQuery(Idle)`)
-- `auth_ok.bin`: `R` packet (9 bytes: `52 00 00 00 08 00 00 00 00` -> `AuthenticationOk`)
-- `backend_key_data.bin`: `K` packet (13 bytes -> `BackendKeyData(pid=1234, secret=5678)`)
+- `fe_*.bin` — frontend (client → server) messages, compared byte-for-byte
+  against encoder output in `test_golden_frontend_encoders`.
+- `be_*.bin` — backend (server → client) messages, parsed and field-asserted in
+  `test_golden_backend_parsers`, and used as the mutation corpus by the
+  truncation / corrupted-header fuzz tests.
+- `ready_for_query_idle.bin`, `auth_ok.bin`, `backend_key_data.bin` — legacy
+  aliases of the corresponding `be_*` fixtures kept for the OPG-103 tests
+  (e.g. `ready_for_query_idle.bin` is the 6-byte frame `5a 00 00 00 05 49`).
+
+The expected decoded values for every fixture are asserted in
+`pgproto/golden_test.odin`; treat that file as the fixture manifest. Tests
+resolve fixture paths relative to the process working directory, so run the
+test suite from the repository root.

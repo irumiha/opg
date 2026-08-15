@@ -793,4 +793,83 @@ test_conn_notification_callback :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_conn_cancel_with_transport :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+
+	err := conn_cancel_with_transport(1234, 5678, transport)
+	testing.expect(t, err == nil, "expected successful cancel request dispatch")
+
+	// CancelRequest packet is 16 bytes: length 16, code 80877102, pid 1234, secret 5678
+	testing.expect_value(t, len(mock.written_bytes), 16)
+	len_i32, _ := endian.get_i32(mock.written_bytes[0:4], .Big)
+	testing.expect_value(t, len_i32, 16)
+	code_i32, _ := endian.get_i32(mock.written_bytes[4:8], .Big)
+	testing.expect_value(t, code_i32, pgproto.CANCEL_REQUEST_CODE)
+	pid_i32, _ := endian.get_i32(mock.written_bytes[8:12], .Big)
+	testing.expect_value(t, pid_i32, 1234)
+	sec_i32, _ := endian.get_i32(mock.written_bytes[12:16], .Big)
+	testing.expect_value(t, sec_i32, 5678)
+
+	testing.expect(t, mock.is_closed, "expected ephemeral cancel transport closed")
+
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_cancel_invalid_conn :: proc(t: ^testing.T) {
+	// nil conn
+	err_nil := conn_cancel(nil)
+	testing.expect(t, err_nil != nil, "expected error for nil conn")
+	#partial switch e in err_nil {
+	case pgerr.Net_Error:
+		testing.expect_value(t, e.type, pgerr.Net_Error_Type.Socket_Closed)
+	case:
+		testing.expect(t, false, "expected Net_Error")
+	}
+
+	// uninitialized pid/secret
+	c: Conn
+	c.backend_pid = 0
+	c.backend_secret = 0
+	err_uninit := conn_cancel(&c)
+	testing.expect(t, err_uninit != nil, "expected error for uninitialized conn")
+	#partial switch e in err_uninit {
+	case pgerr.Net_Error:
+		testing.expect_value(t, e.type, pgerr.Net_Error_Type.Socket_Closed)
+	case:
+		testing.expect(t, false, "expected Net_Error")
+	}
+}
+
+@(test)
+test_conn_cancel_with_transport_write_error :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+	mock.is_closed = true
+
+	transport := make_mock_transport(&mock)
+	err := conn_cancel_with_transport(1234, 5678, transport)
+	testing.expect(t, err != nil, "expected write error when transport is closed")
+
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+
+
 

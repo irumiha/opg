@@ -1,6 +1,8 @@
 package pgconn
 
+import "core:fmt"
 import "core:mem"
+import "core:net"
 import "core:strings"
 import "core:time"
 import "../pgerr"
@@ -195,3 +197,48 @@ conn_close :: proc(conn: ^Conn) {
 
 	conn.status = .Closed
 }
+
+conn_cancel_with_transport :: proc(
+	pid: i32,
+	secret: i32,
+	transport: Stream_Transport,
+) -> pgerr.Error {
+	defer if transport.close != nil {
+		transport.close(transport.data)
+	}
+
+	buf := make([dynamic]byte, context.temp_allocator)
+	defer delete(buf)
+	pgproto.encode_cancel_request(&buf, pid, secret)
+	if transport.write != nil {
+		_, err := transport.write(transport.data, buf[:])
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+conn_cancel :: proc(conn: ^Conn) -> pgerr.Error {
+	if conn == nil do return pgerr.Net_Error{type = .Socket_Closed}
+	if conn.backend_pid == 0 && conn.backend_secret == 0 {
+		return pgerr.Net_Error{
+			type = .Socket_Closed,
+			code = -1,
+		}
+	}
+
+	port := conn.config.port
+	if port <= 0 do port = 5432
+	endpoint := fmt.tprintf("%s:%d", conn.config.host, port)
+
+	socket, nerr := net.dial_tcp_from_hostname_and_port_string(endpoint)
+	if nerr != nil {
+		return pgerr.Net_Error{type = .Connection_Refused, raw_net_error = nerr}
+	}
+
+	tdata: TCP_Transport_Data
+	transport := make_tcp_transport(&tdata, socket)
+	return conn_cancel_with_transport(conn.backend_pid, conn.backend_secret, transport)
+}
+

@@ -182,9 +182,9 @@ Msg_Function_Call_Response :: struct {
 	data:    []byte, // Result byte slice (empty if is_null is true)
 }
 
-Msg_Negotiate_Protocol_Ver :: struct {
-	newest_minor_version: i32,
-	unrecognized_options: []string, // Allocated in temp_allocator
+Msg_Negotiate_Protocol_Version :: struct {
+	minor_version:        i32,
+	unrecognized_options: []string, // Slices into payload allocated via allocator
 }
 
 // ----------------------------------------------------------------------------
@@ -205,7 +205,7 @@ Backend_Message :: union {
 	Msg_Data_Row,
 	Msg_Empty_Query_Response,
 	Msg_Function_Call_Response,
-	Msg_Negotiate_Protocol_Ver,
+	Msg_Negotiate_Protocol_Version,
 	Msg_No_Data,
 	Msg_Notice_Response,
 	Msg_Notification_Response,

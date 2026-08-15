@@ -193,6 +193,13 @@ parse_row_description :: proc(
 			byte_offset = 0,
 		}
 	}
+	if int(num_fields) * 18 > reader_remaining(&r) {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "RowDescription payload too short for field count",
+			byte_offset = r.offset,
+		}
+	}
 
 	fields := make([]Field_Description, int(num_fields), allocator)
 	for i in 0 ..< int(num_fields) {
@@ -255,6 +262,13 @@ parse_data_row :: proc(
 			type = .Malformed_Packet,
 			message = "Invalid negative column count in DataRow",
 			byte_offset = 0,
+		}
+	}
+	if int(num_cols) * 4 > reader_remaining(&r) {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "DataRow payload too short for column count",
+			byte_offset = r.offset,
 		}
 	}
 
@@ -415,6 +429,13 @@ parse_parameter_description :: proc(
 			byte_offset = 0,
 		}
 	}
+	if int(num_params) * 4 > reader_remaining(&r) {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "ParameterDescription payload too short for parameter count",
+			byte_offset = r.offset,
+		}
+	}
 
 	oids := make([]u32, int(num_params), allocator)
 	for i in 0 ..< int(num_params) {
@@ -515,6 +536,13 @@ parse_copy_response :: proc(
 			byte_offset = r.offset,
 		}
 	}
+	if int(num_cols) * 2 > reader_remaining(&r) {
+		return .Text, nil, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "CopyResponse payload too short for column format count",
+			byte_offset = r.offset,
+		}
+	}
 
 	col_fmts := make([]Field_Format, int(num_cols), allocator)
 	for i in 0 ..< int(num_cols) {
@@ -577,13 +605,13 @@ parse_function_call_response :: proc(payload: []byte) -> (msg: Msg_Function_Call
 
 /*
 	parse_negotiate_protocol_version parses a NegotiateProtocolVersion ('v') message payload.
-	Extracts newest minor version and unrecognized options slice.
+	Extracts minor version and unrecognized options slice.
 */
 parse_negotiate_protocol_version :: proc(
 	payload: []byte,
 	allocator := context.temp_allocator,
 ) -> (
-	msg: Msg_Negotiate_Protocol_Ver,
+	msg: Msg_Negotiate_Protocol_Version,
 	err: opg.Error,
 ) {
 	r: Reader
@@ -605,6 +633,13 @@ parse_negotiate_protocol_version :: proc(
 			byte_offset = r.offset,
 		}
 	}
+	if int(num_opts) > reader_remaining(&r) {
+		return {}, opg.Protocol_Error{
+			type = .Malformed_Packet,
+			message = "NegotiateProtocolVersion payload too short for options count",
+			byte_offset = r.offset,
+		}
+	}
 
 	opts := make([]string, int(num_opts), allocator)
 	for i in 0 ..< int(num_opts) {
@@ -619,8 +654,8 @@ parse_negotiate_protocol_version :: proc(
 		opts[i] = opt_str
 	}
 
-	return Msg_Negotiate_Protocol_Ver{
-		newest_minor_version = minor_ver,
+	return Msg_Negotiate_Protocol_Version{
+		minor_version        = minor_ver,
 		unrecognized_options = opts,
 	}, nil
 }

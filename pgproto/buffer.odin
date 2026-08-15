@@ -132,3 +132,71 @@ read_string_nt_clone :: proc(
 	}
 	return cloned, true
 }
+
+/*
+	write_u8 appends a single byte to the dynamic byte builder.
+*/
+write_u8 :: proc(builder: ^[dynamic]byte, val: u8) {
+	append(builder, val)
+}
+
+/*
+	write_i16 appends a big-endian 16-bit signed integer to builder.
+*/
+write_i16 :: proc(builder: ^[dynamic]byte, val: i16) {
+	raw: [2]byte
+	endian.put_i16(raw[:], .Big, val)
+	append(builder, ..raw[:])
+}
+
+/*
+	write_u16 appends a big-endian 16-bit unsigned integer to builder.
+*/
+write_u16 :: proc(builder: ^[dynamic]byte, val: u16) {
+	raw: [2]byte
+	endian.put_u16(raw[:], .Big, val)
+	append(builder, ..raw[:])
+}
+
+/*
+	write_i32 appends a big-endian 32-bit signed integer to builder.
+*/
+write_i32 :: proc(builder: ^[dynamic]byte, val: i32) {
+	raw: [4]byte
+	endian.put_i32(raw[:], .Big, val)
+	append(builder, ..raw[:])
+}
+
+/*
+	write_u32 appends a big-endian 32-bit unsigned integer to builder.
+*/
+write_u32 :: proc(builder: ^[dynamic]byte, val: u32) {
+	raw: [4]byte
+	endian.put_u32(raw[:], .Big, val)
+	append(builder, ..raw[:])
+}
+
+/*
+	write_i64 appends a big-endian 64-bit signed integer to builder.
+*/
+write_i64 :: proc(builder: ^[dynamic]byte, val: i64) {
+	raw: [8]byte
+	endian.put_i64(raw[:], .Big, val)
+	append(builder, ..raw[:])
+}
+
+/*
+	write_bytes appends a byte slice to builder.
+*/
+write_bytes :: proc(builder: ^[dynamic]byte, b: []byte) {
+	append(builder, ..b)
+}
+
+/*
+	write_string_nt appends a null-terminated UTF-8 string to builder.
+*/
+write_string_nt :: proc(builder: ^[dynamic]byte, s: string) {
+	append(builder, ..transmute([]byte)s)
+	append(builder, u8(0x00))
+}
+

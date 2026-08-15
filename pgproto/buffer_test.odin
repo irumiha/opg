@@ -130,3 +130,73 @@ test_stateless_readers_edge_cases :: proc(t: ^testing.T) {
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+@(test)
+test_stateless_writers :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	write_u8(&buf, 0x42)
+	write_i16(&buf, 0x0102)
+	write_u16(&buf, 0x0304)
+	write_i32(&buf, 0x05060708)
+	write_u32(&buf, 0x090A0B0C)
+	write_i64(&buf, 0x0102030405060708)
+	write_string_nt(&buf, "hello")
+	write_bytes(&buf, []byte{0xAA, 0xBB})
+
+	// Validate bytes directly
+	expected := []byte{
+		0x42,
+		0x01, 0x02,
+		0x03, 0x04,
+		0x05, 0x06, 0x07, 0x08,
+		0x09, 0x0A, 0x0B, 0x0C,
+		0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+		'h', 'e', 'l', 'l', 'o', 0x00,
+		0xAA, 0xBB,
+	}
+
+	testing.expect_value(t, len(buf), len(expected))
+	for i in 0 ..< len(expected) {
+		testing.expect_value(t, buf[i], expected[i])
+	}
+
+	// Additional writer edge cases: empty string (just null terminator), empty byte slice
+	write_string_nt(&buf, "")
+	write_bytes(&buf, nil)
+	testing.expect_value(t, len(buf), len(expected) + 1)
+	testing.expect_value(t, buf[len(expected)], u8(0x00))
+
+	// Test negative numbers & round-trip with stateless readers
+	clear(&buf)
+	write_i16(&buf, -1)
+	write_i32(&buf, -42)
+	write_i64(&buf, -100_000_000_000)
+
+	offset := 0
+	val_i16, ok_i16 := read_i16(buf[:], &offset)
+	testing.expect(t, ok_i16, "read_i16 failed for negative")
+	testing.expect_value(t, val_i16, i16(-1))
+
+	val_i32, ok_i32 := read_i32(buf[:], &offset)
+	testing.expect(t, ok_i32, "read_i32 failed for negative")
+	testing.expect_value(t, val_i32, i32(-42))
+
+	val_i64, ok_i64 := read_i64(buf[:], &offset)
+	testing.expect(t, ok_i64, "read_i64 failed for negative")
+	testing.expect_value(t, val_i64, i64(-100_000_000_000))
+	testing.expect_value(t, offset, len(buf))
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+

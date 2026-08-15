@@ -539,4 +539,49 @@ test_encode_frontend_message_all_variants :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_extended_query_pipelining :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// Pipeline: Parse ('P') + Bind ('B') + Describe ('D') + Execute ('E') + Sync ('S')
+	encode_parse(&buf, "stmt", "SELECT $1", []u32{23})
+	encode_bind(&buf, Msg_Bind{
+		portal_name = "p",
+		statement_name = "stmt",
+		param_values = []Bind_Param{{is_null = false, value = transmute([]byte)string("100")}},
+	})
+	encode_describe(&buf, .Portal, "p")
+	encode_execute(&buf, "p", 0)
+	encode_sync(&buf)
+
+	r: Reader
+	reader_init(&r, buf[:])
+
+	// Validate sequence of 5 packets
+	t1, _ := reader_read_u8(&r); l1, _ := reader_read_i32(&r); reader_read_bytes(&r, int(l1 - 4))
+	t2, _ := reader_read_u8(&r); l2, _ := reader_read_i32(&r); reader_read_bytes(&r, int(l2 - 4))
+	t3, _ := reader_read_u8(&r); l3, _ := reader_read_i32(&r); reader_read_bytes(&r, int(l3 - 4))
+	t4, _ := reader_read_u8(&r); l4, _ := reader_read_i32(&r); reader_read_bytes(&r, int(l4 - 4))
+	t5, _ := reader_read_u8(&r); l5, _ := reader_read_i32(&r)
+
+	testing.expect_value(t, t1, u8('P'))
+	testing.expect_value(t, t2, u8('B'))
+	testing.expect_value(t, t3, u8('D'))
+	testing.expect_value(t, t4, u8('E'))
+	testing.expect_value(t, t5, u8('S'))
+	testing.expect_value(t, l5, 4)
+	testing.expect_value(t, reader_remaining(&r), 0)
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 

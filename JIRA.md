@@ -71,7 +71,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-102] Frontend Wire Messages Encoding (Client $\rightarrow$ Server)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgproto`
 - **Files**:
   - `pgproto/frontend.odin`

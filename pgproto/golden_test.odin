@@ -1,5 +1,6 @@
 package pgproto
 
+import "core:encoding/endian"
 import "core:mem"
 import "core:os"
 import "core:slice"
@@ -517,6 +518,367 @@ test_golden_backend_parsers :: proc(t: ^testing.T) {
 		testing.expect_value(t, len(npv.unrecognized_options), 2)
 		testing.expect_value(t, npv.unrecognized_options[0], "opt1")
 		testing.expect_value(t, npv.unrecognized_options[1], "opt2")
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_golden_fuzzing_truncation_matrix :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	backend_fixtures := [?]string{
+		"pgproto/tests_golden_files/be_auth_ok.bin",
+		"pgproto/tests_golden_files/be_auth_md5.bin",
+		"pgproto/tests_golden_files/be_auth_sasl.bin",
+		"pgproto/tests_golden_files/be_auth_sasl_continue.bin",
+		"pgproto/tests_golden_files/be_auth_sasl_final.bin",
+		"pgproto/tests_golden_files/be_backend_key_data.bin",
+		"pgproto/tests_golden_files/be_parameter_status.bin",
+		"pgproto/tests_golden_files/be_ready_for_query_idle.bin",
+		"pgproto/tests_golden_files/be_ready_for_query_tx.bin",
+		"pgproto/tests_golden_files/be_ready_for_query_err.bin",
+		"pgproto/tests_golden_files/be_row_description.bin",
+		"pgproto/tests_golden_files/be_data_row.bin",
+		"pgproto/tests_golden_files/be_command_complete_select.bin",
+		"pgproto/tests_golden_files/be_command_complete_insert.bin",
+		"pgproto/tests_golden_files/be_error_response.bin",
+		"pgproto/tests_golden_files/be_notice_response.bin",
+		"pgproto/tests_golden_files/be_empty_query_response.bin",
+		"pgproto/tests_golden_files/be_parse_complete.bin",
+		"pgproto/tests_golden_files/be_bind_complete.bin",
+		"pgproto/tests_golden_files/be_close_complete.bin",
+		"pgproto/tests_golden_files/be_no_data.bin",
+		"pgproto/tests_golden_files/be_portal_suspended.bin",
+		"pgproto/tests_golden_files/be_parameter_description.bin",
+		"pgproto/tests_golden_files/be_notification_response.bin",
+		"pgproto/tests_golden_files/be_copy_in_response.bin",
+		"pgproto/tests_golden_files/be_copy_out_response.bin",
+		"pgproto/tests_golden_files/be_copy_both_response.bin",
+		"pgproto/tests_golden_files/be_copy_data.bin",
+		"pgproto/tests_golden_files/be_copy_done.bin",
+		"pgproto/tests_golden_files/be_function_call_response.bin",
+		"pgproto/tests_golden_files/be_negotiate_protocol_version.bin",
+	}
+
+	frontend_fixtures := [?]string{
+		"pgproto/tests_golden_files/fe_ssl_request.bin",
+		"pgproto/tests_golden_files/fe_cancel_request.bin",
+		"pgproto/tests_golden_files/fe_startup_message.bin",
+		"pgproto/tests_golden_files/fe_password_message.bin",
+		"pgproto/tests_golden_files/fe_sasl_initial_response.bin",
+		"pgproto/tests_golden_files/fe_sasl_response.bin",
+		"pgproto/tests_golden_files/fe_query.bin",
+		"pgproto/tests_golden_files/fe_parse.bin",
+		"pgproto/tests_golden_files/fe_bind.bin",
+		"pgproto/tests_golden_files/fe_describe_statement.bin",
+		"pgproto/tests_golden_files/fe_describe_portal.bin",
+		"pgproto/tests_golden_files/fe_execute.bin",
+		"pgproto/tests_golden_files/fe_sync.bin",
+		"pgproto/tests_golden_files/fe_flush.bin",
+		"pgproto/tests_golden_files/fe_close_statement.bin",
+		"pgproto/tests_golden_files/fe_close_portal.bin",
+		"pgproto/tests_golden_files/fe_terminate.bin",
+		"pgproto/tests_golden_files/fe_copy_data.bin",
+		"pgproto/tests_golden_files/fe_copy_done.bin",
+		"pgproto/tests_golden_files/fe_copy_fail.bin",
+	}
+
+	testing.expect_value(t, len(backend_fixtures), 31)
+	testing.expect_value(t, len(frontend_fixtures), 20)
+
+	// Test backend truncation matrix: every prefix 0 ..< len(raw) must return typed Protocol_Error
+	for path in backend_fixtures {
+		raw, err_file := os.read_entire_file(path, context.temp_allocator)
+		testing.expect_value(t, err_file, nil)
+
+		// Sanity check full parse
+		_, full_n, full_err := parse_message(raw, context.temp_allocator)
+		testing.expect_value(t, full_err, nil)
+		testing.expect_value(t, full_n, len(raw))
+
+		for prefix in 0 ..< len(raw) {
+			truncated := raw[:prefix]
+			msg, n, err := parse_message(truncated, context.temp_allocator)
+			testing.expect(t, err != nil, "expected error on truncated packet")
+			testing.expect_value(t, n, 0)
+			testing.expect(t, msg == nil, "expected nil message on truncated packet")
+			proto_err, is_proto_err := err.(opg.Protocol_Error)
+			testing.expectf(
+				t,
+				is_proto_err,
+				"expected opg.Protocol_Error for %s prefix %d/%d, got %v",
+				path,
+				prefix,
+				len(raw),
+				err,
+			)
+			testing.expect(t, proto_err.type != .None, "expected non-None Protocol_Error_Type")
+		}
+	}
+
+	// Test frontend decoding via Reader cursor underflow methods
+	for path in frontend_fixtures {
+		raw, err_file := os.read_entire_file(path, context.temp_allocator)
+		testing.expect_value(t, err_file, nil)
+
+		for prefix in 0 ..< len(raw) {
+			truncated := raw[:prefix]
+
+			r: Reader
+			reader_init(&r, truncated)
+
+			// 1. Read single bytes until exhaustion then beyond
+			for {
+				_, ok := reader_read_u8(&r)
+				if !ok do break
+			}
+			_, ok_eof := reader_read_u8(&r)
+			testing.expect(t, !ok_eof, "expected underflow on reader_read_u8 past EOF")
+
+			// 2. Multi-byte integer reads on underflowed buffer
+			if prefix < 2 {
+				reader_init(&r, truncated)
+				_, ok_i16 := reader_read_i16(&r)
+				testing.expect(t, !ok_i16, "expected false on reader_read_i16")
+				reader_init(&r, truncated)
+				_, ok_u16 := reader_read_u16(&r)
+				testing.expect(t, !ok_u16, "expected false on reader_read_u16")
+			}
+			if prefix < 4 {
+				reader_init(&r, truncated)
+				_, ok_i32 := reader_read_i32(&r)
+				testing.expect(t, !ok_i32, "expected false on reader_read_i32")
+				reader_init(&r, truncated)
+				_, ok_u32 := reader_read_u32(&r)
+				testing.expect(t, !ok_u32, "expected false on reader_read_u32")
+			}
+			if prefix < 8 {
+				reader_init(&r, truncated)
+				_, ok_i64 := reader_read_i64(&r)
+				testing.expect(t, !ok_i64, "expected false on reader_read_i64")
+			}
+
+			// 3. Reading more bytes than available
+			reader_init(&r, truncated)
+			_, ok_bytes := reader_read_bytes(&r, len(raw) + 1)
+			testing.expect(t, !ok_bytes, "expected false on reader_read_bytes over length")
+
+			// 4. String reading
+			reader_init(&r, truncated)
+			_, _ = reader_read_string_nt(&r)
+			reader_init(&r, truncated)
+			_, _ = reader_read_string_nt_clone(&r, context.temp_allocator)
+		}
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_golden_corrupted_headers :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	backend_fixtures := [?]string{
+		"pgproto/tests_golden_files/be_auth_ok.bin",
+		"pgproto/tests_golden_files/be_auth_md5.bin",
+		"pgproto/tests_golden_files/be_auth_sasl.bin",
+		"pgproto/tests_golden_files/be_auth_sasl_continue.bin",
+		"pgproto/tests_golden_files/be_auth_sasl_final.bin",
+		"pgproto/tests_golden_files/be_backend_key_data.bin",
+		"pgproto/tests_golden_files/be_parameter_status.bin",
+		"pgproto/tests_golden_files/be_ready_for_query_idle.bin",
+		"pgproto/tests_golden_files/be_ready_for_query_tx.bin",
+		"pgproto/tests_golden_files/be_ready_for_query_err.bin",
+		"pgproto/tests_golden_files/be_row_description.bin",
+		"pgproto/tests_golden_files/be_data_row.bin",
+		"pgproto/tests_golden_files/be_command_complete_select.bin",
+		"pgproto/tests_golden_files/be_command_complete_insert.bin",
+		"pgproto/tests_golden_files/be_error_response.bin",
+		"pgproto/tests_golden_files/be_notice_response.bin",
+		"pgproto/tests_golden_files/be_empty_query_response.bin",
+		"pgproto/tests_golden_files/be_parse_complete.bin",
+		"pgproto/tests_golden_files/be_bind_complete.bin",
+		"pgproto/tests_golden_files/be_close_complete.bin",
+		"pgproto/tests_golden_files/be_no_data.bin",
+		"pgproto/tests_golden_files/be_portal_suspended.bin",
+		"pgproto/tests_golden_files/be_parameter_description.bin",
+		"pgproto/tests_golden_files/be_notification_response.bin",
+		"pgproto/tests_golden_files/be_copy_in_response.bin",
+		"pgproto/tests_golden_files/be_copy_out_response.bin",
+		"pgproto/tests_golden_files/be_copy_both_response.bin",
+		"pgproto/tests_golden_files/be_copy_data.bin",
+		"pgproto/tests_golden_files/be_copy_done.bin",
+		"pgproto/tests_golden_files/be_function_call_response.bin",
+		"pgproto/tests_golden_files/be_negotiate_protocol_version.bin",
+	}
+
+	invalid_types := [?]u8{
+		0x00, 0xFF, 0xFE, 0x80, 0x7F, 0x01, '?', '!', 'x', 'y', 'z', 'a', 'b', 'M', 'Q',
+	}
+
+	negative_lengths := [?]i32{
+		-1, -100, -2147483648, -4, -5, 0, 1, 2, 3,
+	}
+
+	exceeding_lengths := [?]i32{
+		2147483647, // 2^31 - 1
+		1000000,
+		65536,
+		2000,
+	}
+
+	for path in backend_fixtures {
+		raw, err_file := os.read_entire_file(path, context.temp_allocator)
+		testing.expect_value(t, err_file, nil)
+		testing.expect(t, len(raw) >= 5, "expected golden vector to have at least 5 bytes")
+
+		// 1. Bit-flipped and mutated message types
+		// Bit-flip test across all 8 bit positions
+		for bit in 0 ..< 8 {
+			mutated := slice.clone(raw, context.temp_allocator)
+			mutated[0] = raw[0] ~ u8(1 << u8(bit))
+			_, _, err := parse_message(mutated, context.temp_allocator)
+			if err != nil {
+				_, is_proto := err.(opg.Protocol_Error)
+				testing.expect(t, is_proto, "expected opg.Protocol_Error on bit-flipped msg type")
+			}
+		}
+
+		// Explicit invalid message type identifiers
+		for inv_type in invalid_types {
+			mutated := slice.clone(raw, context.temp_allocator)
+			mutated[0] = inv_type
+			msg, n, err := parse_message(mutated, context.temp_allocator)
+			testing.expect(t, err != nil, "expected error on invalid message type")
+			testing.expect_value(t, n, 0)
+			testing.expect(t, msg == nil, "expected nil message on invalid message type")
+			proto_err, is_proto := err.(opg.Protocol_Error)
+			testing.expectf(
+				t,
+				is_proto,
+				"expected opg.Protocol_Error for invalid type 0x%02x on %s, got %v",
+				inv_type,
+				path,
+				err,
+			)
+			testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Unknown_Message_Type)
+		}
+
+		// 2. Negative & sub-minimum length values in header
+		for neg_len in negative_lengths {
+			mutated := slice.clone(raw, context.temp_allocator)
+			len_bytes: [4]byte
+			endian.put_i32(len_bytes[:], .Big, neg_len)
+			copy(mutated[1:5], len_bytes[:])
+
+			msg, n, err := parse_message(mutated, context.temp_allocator)
+			testing.expect(t, err != nil, "expected error on invalid negative length")
+			testing.expect_value(t, n, 0)
+			testing.expect(t, msg == nil, "expected nil message on invalid negative length")
+			proto_err, is_proto := err.(opg.Protocol_Error)
+			testing.expectf(
+				t,
+				is_proto,
+				"expected opg.Protocol_Error for length %d on %s, got %v",
+				neg_len,
+				path,
+				err,
+			)
+			testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Invalid_Length)
+		}
+
+		// 3. Lengths exceeding payload size (including 2^31 - 1)
+		for exc_len in exceeding_lengths {
+			if int(exc_len) + 1 <= len(raw) do continue
+			mutated := slice.clone(raw, context.temp_allocator)
+			len_bytes: [4]byte
+			endian.put_i32(len_bytes[:], .Big, exc_len)
+			copy(mutated[1:5], len_bytes[:])
+
+			msg, n, err := parse_message(mutated, context.temp_allocator)
+			testing.expect(t, err != nil, "expected error on exceeding length")
+			testing.expect_value(t, n, 0)
+			testing.expect(t, msg == nil, "expected nil message on exceeding length")
+			proto_err, is_proto := err.(opg.Protocol_Error)
+			testing.expectf(
+				t,
+				is_proto,
+				"expected opg.Protocol_Error for exceeding length %d on %s, got %v",
+				exc_len,
+				path,
+				err,
+			)
+			testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Buffer_Underflow)
+		}
+	}
+
+	// 4. Payload-level field mutations on specific golden messages
+	// DataRow: negative column count and invalid column length (-2)
+	{
+		raw, _ := os.read_entire_file("pgproto/tests_golden_files/be_data_row.bin", context.temp_allocator)
+		// Corrupt column count to -1
+		mut_cols := slice.clone(raw, context.temp_allocator)
+		mut_cols[5] = 0xFF
+		mut_cols[6] = 0xFF
+		_, _, err_cols := parse_message(mut_cols, context.temp_allocator)
+		testing.expect(t, err_cols != nil, "expected error on negative col count in DataRow")
+
+		// Corrupt column length to -2
+		mut_len := slice.clone(raw, context.temp_allocator)
+		len_bytes: [4]byte
+		endian.put_i32(len_bytes[:], .Big, -2)
+		copy(mut_len[7:11], len_bytes[:])
+		_, _, err_len := parse_message(mut_len, context.temp_allocator)
+		testing.expect(t, err_len != nil, "expected error on invalid negative col length in DataRow")
+	}
+
+	// RowDescription: negative field count
+	{
+		raw, _ := os.read_entire_file("pgproto/tests_golden_files/be_row_description.bin", context.temp_allocator)
+		mut_rd := slice.clone(raw, context.temp_allocator)
+		mut_rd[5] = 0xFF
+		mut_rd[6] = 0xFF
+		_, _, err_rd := parse_message(mut_rd, context.temp_allocator)
+		testing.expect(t, err_rd != nil, "expected error on negative field count in RowDescription")
+	}
+
+	// ReadyForQuery: invalid transaction status character
+	{
+		raw, _ := os.read_entire_file("pgproto/tests_golden_files/be_ready_for_query_idle.bin", context.temp_allocator)
+		mut_rfq := slice.clone(raw, context.temp_allocator)
+		mut_rfq[5] = 'X'
+		_, _, err_rfq := parse_message(mut_rfq, context.temp_allocator)
+		testing.expect(t, err_rfq != nil, "expected error on invalid status in ReadyForQuery")
+	}
+
+	// ParameterDescription: negative parameter count
+	{
+		raw, _ := os.read_entire_file("pgproto/tests_golden_files/be_parameter_description.bin", context.temp_allocator)
+		mut_pd := slice.clone(raw, context.temp_allocator)
+		mut_pd[5] = 0xFF
+		mut_pd[6] = 0xFF
+		_, _, err_pd := parse_message(mut_pd, context.temp_allocator)
+		testing.expect(t, err_pd != nil, "expected error on negative param count in ParameterDescription")
+	}
+
+	// ErrorResponse: unterminated string
+	{
+		raw, _ := os.read_entire_file("pgproto/tests_golden_files/be_error_response.bin", context.temp_allocator)
+		mut_err := slice.clone(raw, context.temp_allocator)
+		for i in 5 ..< len(mut_err) {
+			if mut_err[i] == 0x00 {
+				mut_err[i] = 'A'
+			}
+		}
+		_, _, err_unterm := parse_message(mut_err, context.temp_allocator)
+		testing.expect(t, err_unterm != nil, "expected error on unterminated string in ErrorResponse")
 	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)

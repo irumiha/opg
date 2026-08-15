@@ -7,7 +7,11 @@ run against `Mock_Transport` (no network); integration tests
 (`-define:OPG_INTEGRATION=true`) run against live PostgreSQL 17 via the
 docker compose harness.
 
-Test counts at audit time: 95 unit + 23 integration = 118 (`odin test pgconn -define:OPG_INTEGRATION=true`).
+Test counts at audit time: 103 unit + 27 integration = 130 (`odin test pgconn -define:OPG_INTEGRATION=true`).
+
+Since OPG-205, `Conn_Config.ssl_mode` defaults to `Prefer` and the test
+server runs `ssl=on`, so **every** integration test's live connections run
+over TLS unless the test opts out with `.Disable`.
 
 ## conn.odin
 
@@ -89,6 +93,16 @@ Test counts at audit time: 95 unit + 23 integration = 118 (`odin test pgconn -de
 | `map_recv_error` / `map_send_error` (all enum branches) | `test_stream_error_mappers` | — |
 | `tcp_read` / `tcp_write` / `tcp_close` / `tcp_set_deadlines` / `make_tcp_transport` | `test_make_tcp_transport` (construction) | all integration tests (real socket I/O) |
 
+## tls.odin / tls_openssl.odin
+
+| Proc / behavior | Unit tests | Integration tests |
+|---|---|---|
+| `ssl_negotiate` full truth table (Disable / library absent / 'S' / 'N' / garbage / transport errors, per mode) | `test_ssl_negotiate_disable_sends_nothing`, `test_ssl_negotiate_library_absent`, `test_ssl_negotiate_server_accepts`, `test_ssl_negotiate_server_declines`, `test_ssl_negotiate_unexpected_byte`, `test_ssl_negotiate_transport_errors` | `test_integration_tls_require` ('S' path), `test_integration_tls_disable` (no SSLRequest) |
+| probe: graceful absence / real OpenSSL binding (12 symbols) | `test_tls_probe_bogus_paths_graceful`, `test_tls_probe_real_openssl` | every integration connect (`tls_ensure_loaded`) |
+| `make_tls_transport` handshake + SNI | — (requires real TLS peer) | `test_integration_tls_require`, `test_integration_tls_prefer_default`, and every TLS-upgraded integration test |
+| `tls_read` / `tls_write` / `tls_close` | — | `test_integration_tls_query_roundtrip` (100-row stream) + entire TLS-upgraded suite incl. pool stress |
+| `tls_set_deadlines` | stores values only (same stub level as `tcp_set_deadlines`) | — |
+
 ## auth.odin / auth_scram.odin
 
 | Proc / behavior | Unit tests | Integration tests |
@@ -99,7 +113,10 @@ Test counts at audit time: 95 unit + 23 integration = 118 (`odin test pgconn -de
 
 ## Intentionally uncovered
 
-- **TLS negotiation** — deferred with OPG-205 (not implemented).
+- **Native Schannel / SecureTransport backends** — deferred (OpenSSL-only
+  per the 2026-08-15 OPG-205 decision; probe-list slots exist per OS).
+- **`tls_set_deadlines` OS-level timeouts** — same stub level as
+  `tcp_set_deadlines`.
 - **SCRAM server-signature forgery live** — requires a hostile server;
   covered at unit level.
 - **`tcp_set_deadlines` OS-level socket timeouts** — currently stores values

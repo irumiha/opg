@@ -257,22 +257,18 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-205] Dynamic TLS Probing via `core:dynlib` (Milestone Stage)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgconn`
 - **Files**:
   - `pgconn/tls.odin`
-  - `pgconn/tls_windows.odin`
-  - `pgconn/tls_darwin.odin`
-  - `pgconn/tls_posix.odin`
+  - `pgconn/tls_openssl.odin`
+  - `pgconn/tls_test.odin`
 - **Description**:
-  Implement dynamic runtime probing of OS-native or installed cryptographic libraries using `core:dynlib`.
-- **Probing Priority**:
-  - **Windows**: Windows Schannel API (`secur32.dll` / `sspicli.dll`), fallback to OpenSSL / mbedTLS.
-  - **macOS**: SecureTransport / Security Framework (`Security.framework`), fallback to OpenSSL / mbedTLS.
-  - **Linux / POSIX**: OpenSSL (`libssl.so` / `libcrypto.so`), fallback to mbedTLS (`libmbedtls.so` / `libmbedcrypto.so`).
+  Dynamic runtime probing of installed OpenSSL via `core:dynlib`, with libpq-style `ssl_mode` (`Prefer` default / `Disable` / `Require`) negotiated through SSLRequest before startup. Scope amended 2026-08-15 (see `docs/superpowers/specs/2026-08-15-opg-205-dynamic-tls-design.md`): OpenSSL-only backend, probed per-OS (`libssl.so.3` on Linux, Homebrew/system dylibs on macOS, `libssl-3*.dll` on Windows); native Schannel / SecureTransport backends deferred to a future task — untestable from this environment.
 - **Acceptance Criteria**:
-  - If no TLS library is present, returns `opg.Net_Error{type = .TLS_Handshake_Failed}` gracefully.
-  - When loaded, wraps `core:net.TCP_Socket` in an encrypted TLS read/write stream.
+  - If no TLS library is present, `ssl_mode = .Require` returns `pgerr.Net_Error{type = .TLS_Handshake_Failed}` gracefully; `.Prefer` falls back to plaintext.
+  - When loaded, wraps `core:net.TCP_Socket` in an encrypted TLS read/write stream behind `Stream_Transport`.
+  - Integration tests pin the wire state via `pg_stat_ssl` for all three modes; full suite (incl. pool stress) runs over TLS by default, TSan/ASan clean.
 
 ---
 

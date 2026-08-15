@@ -8,3 +8,4 @@ package tests
 @(require) import "../pgproto"
 @(require) import "../pgconn"
 @(require) import "../pgorm"
+@(require) import ".."

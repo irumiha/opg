@@ -413,7 +413,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-401] Public Root Driver API & Ergonomic Facade
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `opg`
 - **Files**:
   - `root.odin`

@@ -199,4 +199,53 @@ test_stateless_writers :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_packet_framing :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// Test 1: Typed packet 'Q' (Query message) with payload "SELECT 1;\0"
+	len_pos := write_packet_header(&buf, 'Q')
+	testing.expect_value(t, len_pos, 1) // 1 byte type, then length placeholder
+	write_string_nt(&buf, "SELECT 1;")
+	pkt_len := finish_packet(&buf, len_pos)
+
+	// Length includes 4 length bytes + 10 bytes ("SELECT 1;\0") = 14
+	testing.expect_value(t, pkt_len, 14)
+	testing.expect_value(t, len(buf), 15) // 'Q' + 14 bytes
+	testing.expect_value(t, buf[0], u8('Q'))
+
+	offset := 1
+	decoded_len, _ := read_i32(buf[:], &offset)
+	testing.expect_value(t, decoded_len, 14)
+
+	query_str, _ := read_string_nt(buf[:], &offset)
+	testing.expect_value(t, query_str, "SELECT 1;")
+
+	// Test 2: Untyped packet (StartupMessage)
+	clear(&buf)
+	u_len_pos := write_packet_header_untyped(&buf)
+	testing.expect_value(t, u_len_pos, 0)
+	write_i32(&buf, 196608) // Protocol 3.0
+	write_string_nt(&buf, "user")
+	write_string_nt(&buf, "postgres")
+	write_u8(&buf, 0x00) // terminating null
+	u_pkt_len := finish_packet(&buf, u_len_pos)
+
+	testing.expect_value(t, u_pkt_len, len(buf))
+	u_offset := 0
+	u_decoded_len, _ := read_i32(buf[:], &u_offset)
+	testing.expect_value(t, u_decoded_len, i32(u_pkt_len))
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 

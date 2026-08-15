@@ -200,3 +200,41 @@ write_string_nt :: proc(builder: ^[dynamic]byte, s: string) {
 	append(builder, u8(0x00))
 }
 
+/*
+	write_packet_header appends a 1-byte message type and a 4-byte big-endian
+	length placeholder (initialized to 0) to builder. Returns the starting offset
+	of the 4-byte length field within builder.
+*/
+write_packet_header :: proc(builder: ^[dynamic]byte, msg_type: u8) -> (length_pos: int) {
+	append(builder, msg_type)
+	length_pos = len(builder)
+	placeholder := [4]byte{0, 0, 0, 0}
+	append(builder, ..placeholder[:])
+	return length_pos
+}
+
+/*
+	write_packet_header_untyped appends a 4-byte big-endian length placeholder
+	(initialized to 0) to builder without a message type byte (for StartupMessage,
+	SSLRequest, CancelRequest). Returns the starting offset of the 4-byte length field.
+*/
+write_packet_header_untyped :: proc(builder: ^[dynamic]byte) -> (length_pos: int) {
+	length_pos = len(builder)
+	placeholder := [4]byte{0, 0, 0, 0}
+	append(builder, ..placeholder[:])
+	return length_pos
+}
+
+/*
+	finish_packet calculates the total packet length (from length_pos to the end of builder,
+	which includes the 4-byte length field itself) and writes the length as big-endian i32
+	at length_pos. Returns the calculated packet length.
+*/
+finish_packet :: proc(builder: ^[dynamic]byte, length_pos: int) -> int {
+	packet_len := len(builder) - length_pos
+	raw: [4]byte
+	endian.put_i32(raw[:], .Big, i32(packet_len))
+	copy(builder[length_pos:length_pos + 4], raw[:])
+	return packet_len
+}
+

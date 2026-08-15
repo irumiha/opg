@@ -7,6 +7,95 @@ import "core:slice"
 import "core:testing"
 import opg ".."
 
+BACKEND_FIXTURES :: [?]string{
+	"pgproto/tests_golden_files/be_auth_ok.bin",
+	"pgproto/tests_golden_files/be_auth_md5.bin",
+	"pgproto/tests_golden_files/be_auth_sasl.bin",
+	"pgproto/tests_golden_files/be_auth_sasl_continue.bin",
+	"pgproto/tests_golden_files/be_auth_sasl_final.bin",
+	"pgproto/tests_golden_files/be_backend_key_data.bin",
+	"pgproto/tests_golden_files/be_parameter_status.bin",
+	"pgproto/tests_golden_files/be_ready_for_query_idle.bin",
+	"pgproto/tests_golden_files/be_ready_for_query_tx.bin",
+	"pgproto/tests_golden_files/be_ready_for_query_err.bin",
+	"pgproto/tests_golden_files/be_row_description.bin",
+	"pgproto/tests_golden_files/be_data_row.bin",
+	"pgproto/tests_golden_files/be_command_complete_select.bin",
+	"pgproto/tests_golden_files/be_command_complete_insert.bin",
+	"pgproto/tests_golden_files/be_error_response.bin",
+	"pgproto/tests_golden_files/be_notice_response.bin",
+	"pgproto/tests_golden_files/be_empty_query_response.bin",
+	"pgproto/tests_golden_files/be_parse_complete.bin",
+	"pgproto/tests_golden_files/be_bind_complete.bin",
+	"pgproto/tests_golden_files/be_close_complete.bin",
+	"pgproto/tests_golden_files/be_no_data.bin",
+	"pgproto/tests_golden_files/be_portal_suspended.bin",
+	"pgproto/tests_golden_files/be_parameter_description.bin",
+	"pgproto/tests_golden_files/be_notification_response.bin",
+	"pgproto/tests_golden_files/be_copy_in_response.bin",
+	"pgproto/tests_golden_files/be_copy_out_response.bin",
+	"pgproto/tests_golden_files/be_copy_both_response.bin",
+	"pgproto/tests_golden_files/be_copy_data.bin",
+	"pgproto/tests_golden_files/be_copy_done.bin",
+	"pgproto/tests_golden_files/be_function_call_response.bin",
+	"pgproto/tests_golden_files/be_negotiate_protocol_version.bin",
+}
+
+FRONTEND_FIXTURES :: [?]string{
+	"pgproto/tests_golden_files/fe_ssl_request.bin",
+	"pgproto/tests_golden_files/fe_cancel_request.bin",
+	"pgproto/tests_golden_files/fe_startup_message.bin",
+	"pgproto/tests_golden_files/fe_password_message.bin",
+	"pgproto/tests_golden_files/fe_sasl_initial_response.bin",
+	"pgproto/tests_golden_files/fe_sasl_response.bin",
+	"pgproto/tests_golden_files/fe_query.bin",
+	"pgproto/tests_golden_files/fe_parse.bin",
+	"pgproto/tests_golden_files/fe_bind.bin",
+	"pgproto/tests_golden_files/fe_describe_statement.bin",
+	"pgproto/tests_golden_files/fe_describe_portal.bin",
+	"pgproto/tests_golden_files/fe_execute.bin",
+	"pgproto/tests_golden_files/fe_sync.bin",
+	"pgproto/tests_golden_files/fe_flush.bin",
+	"pgproto/tests_golden_files/fe_close_statement.bin",
+	"pgproto/tests_golden_files/fe_close_portal.bin",
+	"pgproto/tests_golden_files/fe_terminate.bin",
+	"pgproto/tests_golden_files/fe_copy_data.bin",
+	"pgproto/tests_golden_files/fe_copy_done.bin",
+	"pgproto/tests_golden_files/fe_copy_fail.bin",
+}
+
+is_valid_backend_type :: proc(b: u8) -> bool {
+	#partial switch Backend_Message_Type(b) {
+	case .Authentication,
+	     .Backend_Key_Data,
+	     .Bind_Complete,
+	     .Close_Complete,
+	     .Command_Complete,
+	     .Copy_Data,
+	     .Copy_Done,
+	     .Copy_In_Response,
+	     .Copy_Out_Response,
+	     .Copy_Both_Response,
+	     .Data_Row,
+	     .Empty_Query_Response,
+	     .Error_Response,
+	     .Function_Call_Response,
+	     .Negotiate_Protocol_Ver,
+	     .No_Data,
+	     .Notice_Response,
+	     .Notification_Response,
+	     .Parameter_Description,
+	     .Parameter_Status,
+	     .Parse_Complete,
+	     .Portal_Suspended,
+	     .Ready_For_Query,
+	     .Row_Description:
+		return true
+	case:
+		return false
+	}
+}
+
 @(test)
 test_golden_frontend_encoders :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
@@ -176,6 +265,9 @@ test_golden_frontend_encoders :: proc(t: ^testing.T) {
 	)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+	for _, leak in track.allocation_map {
+		testing.expectf(t, false, "Memory leak: %v bytes at %v", leak.size, leak.location)
+	}
 }
 
 @(test)
@@ -521,6 +613,9 @@ test_golden_backend_parsers :: proc(t: ^testing.T) {
 	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+	for _, leak in track.allocation_map {
+		testing.expectf(t, false, "Memory leak: %v bytes at %v", leak.size, leak.location)
+	}
 }
 
 @(test)
@@ -530,68 +625,11 @@ test_golden_fuzzing_truncation_matrix :: proc(t: ^testing.T) {
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	backend_fixtures := [?]string{
-		"pgproto/tests_golden_files/be_auth_ok.bin",
-		"pgproto/tests_golden_files/be_auth_md5.bin",
-		"pgproto/tests_golden_files/be_auth_sasl.bin",
-		"pgproto/tests_golden_files/be_auth_sasl_continue.bin",
-		"pgproto/tests_golden_files/be_auth_sasl_final.bin",
-		"pgproto/tests_golden_files/be_backend_key_data.bin",
-		"pgproto/tests_golden_files/be_parameter_status.bin",
-		"pgproto/tests_golden_files/be_ready_for_query_idle.bin",
-		"pgproto/tests_golden_files/be_ready_for_query_tx.bin",
-		"pgproto/tests_golden_files/be_ready_for_query_err.bin",
-		"pgproto/tests_golden_files/be_row_description.bin",
-		"pgproto/tests_golden_files/be_data_row.bin",
-		"pgproto/tests_golden_files/be_command_complete_select.bin",
-		"pgproto/tests_golden_files/be_command_complete_insert.bin",
-		"pgproto/tests_golden_files/be_error_response.bin",
-		"pgproto/tests_golden_files/be_notice_response.bin",
-		"pgproto/tests_golden_files/be_empty_query_response.bin",
-		"pgproto/tests_golden_files/be_parse_complete.bin",
-		"pgproto/tests_golden_files/be_bind_complete.bin",
-		"pgproto/tests_golden_files/be_close_complete.bin",
-		"pgproto/tests_golden_files/be_no_data.bin",
-		"pgproto/tests_golden_files/be_portal_suspended.bin",
-		"pgproto/tests_golden_files/be_parameter_description.bin",
-		"pgproto/tests_golden_files/be_notification_response.bin",
-		"pgproto/tests_golden_files/be_copy_in_response.bin",
-		"pgproto/tests_golden_files/be_copy_out_response.bin",
-		"pgproto/tests_golden_files/be_copy_both_response.bin",
-		"pgproto/tests_golden_files/be_copy_data.bin",
-		"pgproto/tests_golden_files/be_copy_done.bin",
-		"pgproto/tests_golden_files/be_function_call_response.bin",
-		"pgproto/tests_golden_files/be_negotiate_protocol_version.bin",
-	}
-
-	frontend_fixtures := [?]string{
-		"pgproto/tests_golden_files/fe_ssl_request.bin",
-		"pgproto/tests_golden_files/fe_cancel_request.bin",
-		"pgproto/tests_golden_files/fe_startup_message.bin",
-		"pgproto/tests_golden_files/fe_password_message.bin",
-		"pgproto/tests_golden_files/fe_sasl_initial_response.bin",
-		"pgproto/tests_golden_files/fe_sasl_response.bin",
-		"pgproto/tests_golden_files/fe_query.bin",
-		"pgproto/tests_golden_files/fe_parse.bin",
-		"pgproto/tests_golden_files/fe_bind.bin",
-		"pgproto/tests_golden_files/fe_describe_statement.bin",
-		"pgproto/tests_golden_files/fe_describe_portal.bin",
-		"pgproto/tests_golden_files/fe_execute.bin",
-		"pgproto/tests_golden_files/fe_sync.bin",
-		"pgproto/tests_golden_files/fe_flush.bin",
-		"pgproto/tests_golden_files/fe_close_statement.bin",
-		"pgproto/tests_golden_files/fe_close_portal.bin",
-		"pgproto/tests_golden_files/fe_terminate.bin",
-		"pgproto/tests_golden_files/fe_copy_data.bin",
-		"pgproto/tests_golden_files/fe_copy_done.bin",
-		"pgproto/tests_golden_files/fe_copy_fail.bin",
-	}
-
-	testing.expect_value(t, len(backend_fixtures), 31)
-	testing.expect_value(t, len(frontend_fixtures), 20)
+	testing.expect_value(t, len(BACKEND_FIXTURES), 31)
+	testing.expect_value(t, len(FRONTEND_FIXTURES), 20)
 
 	// Test backend truncation matrix: every prefix 0 ..< len(raw) must return typed Protocol_Error
-	for path in backend_fixtures {
+	for path in BACKEND_FIXTURES {
 		raw, err_file := os.read_entire_file(path, context.temp_allocator)
 		testing.expect_value(t, err_file, nil)
 
@@ -621,7 +659,7 @@ test_golden_fuzzing_truncation_matrix :: proc(t: ^testing.T) {
 	}
 
 	// Test frontend decoding via Reader cursor underflow methods
-	for path in frontend_fixtures {
+	for path in FRONTEND_FIXTURES {
 		raw, err_file := os.read_entire_file(path, context.temp_allocator)
 		testing.expect_value(t, err_file, nil)
 
@@ -676,6 +714,9 @@ test_golden_fuzzing_truncation_matrix :: proc(t: ^testing.T) {
 	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+	for _, leak in track.allocation_map {
+		testing.expectf(t, false, "Memory leak: %v bytes at %v", leak.size, leak.location)
+	}
 }
 
 @(test)
@@ -684,40 +725,6 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
-
-	backend_fixtures := [?]string{
-		"pgproto/tests_golden_files/be_auth_ok.bin",
-		"pgproto/tests_golden_files/be_auth_md5.bin",
-		"pgproto/tests_golden_files/be_auth_sasl.bin",
-		"pgproto/tests_golden_files/be_auth_sasl_continue.bin",
-		"pgproto/tests_golden_files/be_auth_sasl_final.bin",
-		"pgproto/tests_golden_files/be_backend_key_data.bin",
-		"pgproto/tests_golden_files/be_parameter_status.bin",
-		"pgproto/tests_golden_files/be_ready_for_query_idle.bin",
-		"pgproto/tests_golden_files/be_ready_for_query_tx.bin",
-		"pgproto/tests_golden_files/be_ready_for_query_err.bin",
-		"pgproto/tests_golden_files/be_row_description.bin",
-		"pgproto/tests_golden_files/be_data_row.bin",
-		"pgproto/tests_golden_files/be_command_complete_select.bin",
-		"pgproto/tests_golden_files/be_command_complete_insert.bin",
-		"pgproto/tests_golden_files/be_error_response.bin",
-		"pgproto/tests_golden_files/be_notice_response.bin",
-		"pgproto/tests_golden_files/be_empty_query_response.bin",
-		"pgproto/tests_golden_files/be_parse_complete.bin",
-		"pgproto/tests_golden_files/be_bind_complete.bin",
-		"pgproto/tests_golden_files/be_close_complete.bin",
-		"pgproto/tests_golden_files/be_no_data.bin",
-		"pgproto/tests_golden_files/be_portal_suspended.bin",
-		"pgproto/tests_golden_files/be_parameter_description.bin",
-		"pgproto/tests_golden_files/be_notification_response.bin",
-		"pgproto/tests_golden_files/be_copy_in_response.bin",
-		"pgproto/tests_golden_files/be_copy_out_response.bin",
-		"pgproto/tests_golden_files/be_copy_both_response.bin",
-		"pgproto/tests_golden_files/be_copy_data.bin",
-		"pgproto/tests_golden_files/be_copy_done.bin",
-		"pgproto/tests_golden_files/be_function_call_response.bin",
-		"pgproto/tests_golden_files/be_negotiate_protocol_version.bin",
-	}
 
 	invalid_types := [?]u8{
 		0x00, 0xFF, 0xFE, 0x80, 0x7F, 0x01, '?', '!', 'x', 'y', 'z', 'a', 'b', 'M', 'Q',
@@ -734,7 +741,7 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 		2000,
 	}
 
-	for path in backend_fixtures {
+	for path in BACKEND_FIXTURES {
 		raw, err_file := os.read_entire_file(path, context.temp_allocator)
 		testing.expect_value(t, err_file, nil)
 		testing.expect(t, len(raw) >= 5, "expected golden vector to have at least 5 bytes")
@@ -743,11 +750,33 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 		// Bit-flip test across all 8 bit positions
 		for bit in 0 ..< 8 {
 			mutated := slice.clone(raw, context.temp_allocator)
-			mutated[0] = raw[0] ~ u8(1 << u8(bit))
+			flipped_type := raw[0] ~ u8(1 << u8(bit))
+			mutated[0] = flipped_type
 			_, _, err := parse_message(mutated, context.temp_allocator)
-			if err != nil {
-				_, is_proto := err.(opg.Protocol_Error)
-				testing.expect(t, is_proto, "expected opg.Protocol_Error on bit-flipped msg type")
+			if is_valid_backend_type(flipped_type) {
+				if err != nil {
+					_, is_proto := err.(opg.Protocol_Error)
+					testing.expect(t, is_proto, "expected opg.Protocol_Error on bit-flipped msg type")
+				}
+			} else {
+				testing.expectf(
+					t,
+					err != nil,
+					"expected error on unknown message type 0x%02x from bit flip %d on %s",
+					flipped_type,
+					bit,
+					path,
+				)
+				proto_err, is_proto := err.(opg.Protocol_Error)
+				testing.expectf(
+					t,
+					is_proto,
+					"expected opg.Protocol_Error for unknown type 0x%02x on %s, got %v",
+					flipped_type,
+					path,
+					err,
+				)
+				testing.expect_value(t, proto_err.type, opg.Protocol_Error_Type.Unknown_Message_Type)
 			}
 		}
 
@@ -882,4 +911,7 @@ test_golden_corrupted_headers :: proc(t: ^testing.T) {
 	}
 
 	testing.expect_value(t, len(track.allocation_map), 0)
+	for _, leak in track.allocation_map {
+		testing.expectf(t, false, "Memory leak: %v bytes at %v", leak.size, leak.location)
+	}
 }

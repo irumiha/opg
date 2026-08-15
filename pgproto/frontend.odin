@@ -83,6 +83,37 @@ Msg_Close :: struct {
 	name:        string,
 }
 
+Msg_Copy_Data :: struct {
+	data: []byte,
+}
+
+Msg_Copy_Done :: struct {}
+
+Msg_Copy_Fail :: struct {
+	message: string,
+}
+
+Frontend_Message :: union {
+	Msg_Startup,
+	Msg_SSL_Request,
+	Msg_Cancel_Request,
+	Msg_Password,
+	Msg_SASL_Initial_Response,
+	Msg_SASL_Response,
+	Msg_Query,
+	Msg_Parse,
+	Msg_Bind,
+	Msg_Describe,
+	Msg_Execute,
+	Msg_Sync,
+	Msg_Flush,
+	Msg_Close,
+	Msg_Terminate,
+	Msg_Copy_Data,
+	Msg_Copy_Done,
+	Msg_Copy_Fail,
+}
+
 
 encode_ssl_request :: proc(builder: ^[dynamic]byte) -> int {
 	start_len := len(builder)
@@ -261,4 +292,70 @@ encode_close :: proc(
 	finish_packet(builder, pos)
 	return len(builder) - start_len
 }
+
+encode_copy_data :: proc(builder: ^[dynamic]byte, data: []byte) -> int {
+	start_len := len(builder)
+	pos := write_packet_header(builder, 'd')
+	write_bytes(builder, data)
+	finish_packet(builder, pos)
+	return len(builder) - start_len
+}
+
+encode_copy_done :: proc(builder: ^[dynamic]byte) -> int {
+	start_len := len(builder)
+	pos := write_packet_header(builder, 'c')
+	finish_packet(builder, pos)
+	return len(builder) - start_len
+}
+
+encode_copy_fail :: proc(builder: ^[dynamic]byte, message: string) -> int {
+	start_len := len(builder)
+	pos := write_packet_header(builder, 'f')
+	write_string_nt(builder, message)
+	finish_packet(builder, pos)
+	return len(builder) - start_len
+}
+
+encode_frontend_message :: proc(builder: ^[dynamic]byte, msg: Frontend_Message) -> int {
+	switch m in msg {
+	case Msg_Startup:
+		return encode_startup(builder, m)
+	case Msg_SSL_Request:
+		return encode_ssl_request(builder)
+	case Msg_Cancel_Request:
+		return encode_cancel_request(builder, m.process_id, m.secret_key)
+	case Msg_Password:
+		return encode_password(builder, m.password)
+	case Msg_SASL_Initial_Response:
+		return encode_sasl_initial_response(builder, m)
+	case Msg_SASL_Response:
+		return encode_sasl_response(builder, m.data)
+	case Msg_Query:
+		return encode_query(builder, m.query)
+	case Msg_Parse:
+		return encode_parse(builder, m.statement_name, m.query, m.param_oids)
+	case Msg_Bind:
+		return encode_bind(builder, m)
+	case Msg_Describe:
+		return encode_describe(builder, m.target_type, m.name)
+	case Msg_Execute:
+		return encode_execute(builder, m.portal_name, m.max_rows)
+	case Msg_Sync:
+		return encode_sync(builder)
+	case Msg_Flush:
+		return encode_flush(builder)
+	case Msg_Close:
+		return encode_close(builder, m.target_type, m.name)
+	case Msg_Terminate:
+		return encode_terminate(builder)
+	case Msg_Copy_Data:
+		return encode_copy_data(builder, m.data)
+	case Msg_Copy_Done:
+		return encode_copy_done(builder)
+	case Msg_Copy_Fail:
+		return encode_copy_fail(builder, m.message)
+	}
+	return 0
+}
+
 

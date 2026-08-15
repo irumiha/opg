@@ -429,3 +429,114 @@ test_encode_extended_query_defaults_and_edge_cases :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_encode_copy_and_dispatcher :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// 1. CopyData
+	cd_len := encode_copy_data(&buf, transmute([]byte)string("raw_row_bytes"))
+	testing.expect_value(t, cd_len, len(buf))
+	r: Reader
+	reader_init(&r, buf[:])
+	cd_type, _ := reader_read_u8(&r)
+	cd_pkt_len, _ := reader_read_i32(&r)
+	cd_bytes, _ := reader_read_bytes(&r, int(cd_pkt_len - 4))
+	testing.expect_value(t, cd_type, u8('d'))
+	testing.expect_value(t, string(cd_bytes), "raw_row_bytes")
+
+	// 2. CopyDone
+	clear(&buf)
+	encode_copy_done(&buf)
+	reader_init(&r, buf[:])
+	cdo_type, _ := reader_read_u8(&r)
+	cdo_len, _ := reader_read_i32(&r)
+	testing.expect_value(t, cdo_type, u8('c'))
+	testing.expect_value(t, cdo_len, 4)
+
+	// 3. CopyFail
+	clear(&buf)
+	encode_copy_fail(&buf, "disk full")
+	reader_init(&r, buf[:])
+	cf_type, _ := reader_read_u8(&r)
+	cf_pkt_len, _ := reader_read_i32(&r)
+	cf_msg, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, cf_type, u8('f'))
+	testing.expect_value(t, cf_pkt_len, i32(len(buf) - 1))
+	testing.expect_value(t, cf_msg, "disk full")
+
+	// 4. Master Dispatcher (sample)
+	clear(&buf)
+	m1 := Frontend_Message(Msg_Query{query = "SELECT 42;"})
+	m2 := Frontend_Message(Msg_Sync{})
+	encode_frontend_message(&buf, m1)
+	encode_frontend_message(&buf, m2)
+
+	reader_init(&r, buf[:])
+	m1_t, _ := reader_read_u8(&r)
+	m1_l, _ := reader_read_i32(&r)
+	m1_q, _ := reader_read_string_nt(&r)
+	m2_t, _ := reader_read_u8(&r)
+	m2_l, _ := reader_read_i32(&r)
+	testing.expect_value(t, m1_t, u8('Q'))
+	testing.expect_value(t, m1_l, 4 + 11) // 4 + len("SELECT 42;\0")
+	testing.expect_value(t, m1_q, "SELECT 42;")
+	testing.expect_value(t, m2_t, u8('S'))
+	testing.expect_value(t, m2_l, 4)
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_encode_frontend_message_all_variants :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	messages := []Frontend_Message{
+		Msg_Startup{protocol_version = 196608, params = []Startup_Param{{name = "user", value = "postgres"}}},
+		Msg_SSL_Request{},
+		Msg_Cancel_Request{process_id = 123, secret_key = 456},
+		Msg_Password{password = "secret"},
+		Msg_SASL_Initial_Response{mechanism = "SCRAM-SHA-256", data = transmute([]byte)string("client-first")},
+		Msg_SASL_Response{data = transmute([]byte)string("client-final")},
+		Msg_Query{query = "SELECT 1"},
+		Msg_Parse{statement_name = "s1", query = "SELECT $1", param_oids = []u32{23}},
+		Msg_Bind{portal_name = "p1", statement_name = "s1"},
+		Msg_Describe{target_type = .Statement, name = "s1"},
+		Msg_Execute{portal_name = "p1", max_rows = 10},
+		Msg_Sync{},
+		Msg_Flush{},
+		Msg_Close{target_type = .Portal, name = "p1"},
+		Msg_Terminate{},
+		Msg_Copy_Data{data = transmute([]byte)string("row-data")},
+		Msg_Copy_Done{},
+		Msg_Copy_Fail{message = "abort copy"},
+	}
+
+	for msg in messages {
+		clear(&buf)
+		encoded_len := encode_frontend_message(&buf, msg)
+		testing.expect_value(t, encoded_len, len(buf))
+		testing.expect(t, encoded_len > 0)
+	}
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+

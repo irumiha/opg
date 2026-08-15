@@ -202,7 +202,11 @@ parse_row_description :: proc(
 			byte_offset = 0,
 		}
 	}
-	if int(num_fields) * 18 > reader_remaining(&r) {
+	// Each field needs at least 19 bytes: 1 for the empty name's null
+	// terminator plus 18 bytes of fixed metadata
+	// (u32 table_oid + i16 col_attr + u32 type_oid + i16 type_size +
+	// i32 type_mod + i16 format_code).
+	if int(num_fields) * 19 > reader_remaining(&r) {
 		return {}, pgerr.Protocol_Error{
 			type = .Malformed_Packet,
 			message = "RowDescription payload too short for field count",

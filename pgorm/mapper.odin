@@ -72,7 +72,13 @@ map_row_to_struct :: proc(
 		#partial switch variant in field_ti.variant {
 		case reflect.Type_Info_String:
 			// Copy string slice into temp_allocator
-			str_val := strings.clone_from_bytes(col_val.data, allocator)
+			str_val, clone_err := strings.clone_from_bytes(col_val.data, allocator)
+			if clone_err != .None {
+				return result, pgerr.Protocol_Error{
+					type = .Malformed_Packet,
+					message = "Failed to allocate string during row mapping",
+				}
+			}
 			(^string)(field_ptr)^ = str_val
 
 		case reflect.Type_Info_Integer:

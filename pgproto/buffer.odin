@@ -176,7 +176,11 @@ reader_read_i16 :: proc(r: ^Reader) -> (val: i16, ok: bool) {
 	if r.offset < 0 || r.offset + 2 > len(r.buf) {
 		return 0, false
 	}
-	val = endian.get_i16(r.buf[r.offset:r.offset + 2], .Big) or_return
+	v, ok_get := endian.get_i16(r.buf[r.offset:r.offset + 2], .Big)
+	if !ok_get {
+		return 0, false
+	}
+	val = v
 	r.offset += 2
 	return val, true
 }
@@ -188,7 +192,11 @@ reader_read_u16 :: proc(r: ^Reader) -> (val: u16, ok: bool) {
 	if r.offset < 0 || r.offset + 2 > len(r.buf) {
 		return 0, false
 	}
-	val = endian.get_u16(r.buf[r.offset:r.offset + 2], .Big) or_return
+	v, ok_get := endian.get_u16(r.buf[r.offset:r.offset + 2], .Big)
+	if !ok_get {
+		return 0, false
+	}
+	val = v
 	r.offset += 2
 	return val, true
 }
@@ -200,7 +208,11 @@ reader_read_i32 :: proc(r: ^Reader) -> (val: i32, ok: bool) {
 	if r.offset < 0 || r.offset + 4 > len(r.buf) {
 		return 0, false
 	}
-	val = endian.get_i32(r.buf[r.offset:r.offset + 4], .Big) or_return
+	v, ok_get := endian.get_i32(r.buf[r.offset:r.offset + 4], .Big)
+	if !ok_get {
+		return 0, false
+	}
+	val = v
 	r.offset += 4
 	return val, true
 }
@@ -212,7 +224,11 @@ reader_read_u32 :: proc(r: ^Reader) -> (val: u32, ok: bool) {
 	if r.offset < 0 || r.offset + 4 > len(r.buf) {
 		return 0, false
 	}
-	val = endian.get_u32(r.buf[r.offset:r.offset + 4], .Big) or_return
+	v, ok_get := endian.get_u32(r.buf[r.offset:r.offset + 4], .Big)
+	if !ok_get {
+		return 0, false
+	}
+	val = v
 	r.offset += 4
 	return val, true
 }
@@ -224,7 +240,11 @@ reader_read_i64 :: proc(r: ^Reader) -> (val: i64, ok: bool) {
 	if r.offset < 0 || r.offset + 8 > len(r.buf) {
 		return 0, false
 	}
-	val = endian.get_i64(r.buf[r.offset:r.offset + 8], .Big) or_return
+	v, ok_get := endian.get_i64(r.buf[r.offset:r.offset + 8], .Big)
+	if !ok_get {
+		return 0, false
+	}
+	val = v
 	r.offset += 8
 	return val, true
 }
@@ -273,9 +293,12 @@ reader_read_string_nt_clone :: proc(
 	ok: bool,
 ) {
 	saved_offset := r.offset
-	str_slice := reader_read_string_nt(r) or_return
-	cloned, err := strings.clone(str_slice, allocator)
-	if err != nil {
+	str_slice, ok_read := reader_read_string_nt(r)
+	if !ok_read {
+		return "", false
+	}
+	cloned, clone_err := strings.clone(str_slice, allocator)
+	if clone_err != .None {
 		r.offset = saved_offset
 		return "", false
 	}

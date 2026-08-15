@@ -216,3 +216,60 @@ scram_client_final :: proc(
 	result := strings.concatenate({client_final_without_proof, ",p=", b64_proof}, allocator)
 	return result, nil
 }
+
+/*
+	scram_verify_server_final extracts v= attribute from server-final-message
+	and compares against state.server_signature.
+*/
+scram_verify_server_final :: proc(
+	state: ^Scram_State,
+	server_final_msg: string,
+	allocator := context.temp_allocator,
+) -> pgerr.Error {
+	parts := strings.split(server_final_msg, ",", context.temp_allocator)
+	var_v_b64 := ""
+
+	for part in parts {
+		if len(part) >= 2 && part[0] == 'v' && part[1] == '=' {
+			var_v_b64 = part[2:]
+		} else if len(part) >= 2 && part[0] == 'e' && part[1] == '=' {
+			return pgerr.Auth_Error{
+				type = .Authentication_Failed,
+				message = strings.clone(part[2:], allocator),
+			}
+		}
+	}
+
+	if len(var_v_b64) == 0 {
+		return pgerr.Auth_Error{
+			type = .SCRAM_Invalid_Server_Final_Message,
+			message = "Missing v= signature in SCRAM server-final message",
+		}
+	}
+
+	decoded_sig, decode_err := base64.decode(var_v_b64, allocator = context.temp_allocator)
+	if decode_err != nil || len(decoded_sig) != 32 {
+		return pgerr.Auth_Error{
+			type = .SCRAM_Invalid_Server_Final_Message,
+			message = "Invalid base64 signature in SCRAM server-final message",
+		}
+	}
+
+	// Compare decoded signature with state.server_signature in constant time
+	matches := true
+	for i in 0 ..< 32 {
+		if decoded_sig[i] != state.server_signature[i] {
+			matches = false
+		}
+	}
+
+	if !matches {
+		return pgerr.Auth_Error{
+			type = .SCRAM_Server_Signature_Mismatch,
+			message = "Server SCRAM signature mismatch",
+		}
+	}
+
+	return nil
+}
+

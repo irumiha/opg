@@ -728,5 +728,61 @@ test_stream_read_borrowed_string_validity_with_compaction :: proc(t: ^testing.T)
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_stream_write_messages_pipelined :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	{
+		mock: Mock_Transport
+		mock_transport_init(&mock)
+		defer mock_transport_destroy(&mock)
+
+		transport := make_mock_transport(&mock)
+		stream: Stream_Buffer
+		stream_init(&stream, transport)
+		defer stream_destroy(&stream)
+
+		msg1 := []byte{'P', 0, 0, 0, 4}
+		msg2 := []byte{'B', 0, 0, 0, 4}
+		msg3 := []byte{'S', 0, 0, 0, 4}
+
+		err := stream_write_messages(&stream, msg1, msg2, msg3)
+		testing.expect(t, err == nil, "expected successful write of pipelined messages")
+		testing.expect_value(t, len(mock.written_bytes), 15)
+		testing.expect_value(t, mock.written_bytes[0], 'P')
+		testing.expect_value(t, mock.written_bytes[5], 'B')
+		testing.expect_value(t, mock.written_bytes[10], 'S')
+
+		// Test writing with empty slices (should skip without error)
+		err_empty := stream_write_messages(&stream, []byte{})
+		testing.expect(t, err_empty == nil, "expected empty message write to succeed")
+		testing.expect_value(t, len(mock.written_bytes), 15)
+
+		// Test nil stream or nil transport.write
+		err_nil := stream_write_messages(nil, msg1)
+		testing.expect(t, err_nil != nil, "expected error on nil stream")
+		net_err, is_net := err_nil.(pgerr.Net_Error)
+		testing.expect(t, is_net)
+		testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+
+		stream_no_write: Stream_Buffer
+		err_no_write := stream_write_messages(&stream_no_write, msg1)
+		testing.expect(t, err_no_write != nil, "expected error on nil transport.write")
+
+		// Test transport write error (e.g., closed transport)
+		mock.is_closed = true
+		err_closed := stream_write_messages(&stream, msg1)
+		testing.expect(t, err_closed != nil, "expected error on closed transport write")
+		closed_net_err, is_closed_net := err_closed.(pgerr.Net_Error)
+		testing.expect(t, is_closed_net)
+		testing.expect_value(t, closed_net_err.type, pgerr.Net_Error_Type.Socket_Closed)
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 
 

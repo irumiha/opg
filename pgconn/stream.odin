@@ -237,4 +237,24 @@ stream_read_message :: proc(
 	}
 }
 
+stream_write_messages :: proc(
+	s: ^Stream_Buffer,
+	msgs: ..[]byte,
+) -> (
+	err: pgerr.Error,
+) {
+	if s == nil || s.transport.write == nil {
+		return pgerr.Net_Error{type = .Socket_Closed}
+	}
+
+	for msg in msgs {
+		if len(msg) == 0 do continue
+		_, werr := s.transport.write(s.transport.data, msg)
+		if werr != nil {
+			return werr
+		}
+	}
+	return nil
+}
+
 

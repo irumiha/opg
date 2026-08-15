@@ -188,3 +188,244 @@ test_encode_query_and_terminate :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_encode_extended_query_messages :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// 1. Parse
+	p_len := encode_parse(&buf, "stmt_1", "SELECT $1::int4", []u32{23})
+	testing.expect_value(t, p_len, len(buf))
+	r: Reader
+	reader_init(&r, buf[:])
+	p_type, _ := reader_read_u8(&r)
+	p_pkt_len, _ := reader_read_i32(&r)
+	p_stmt, _ := reader_read_string_nt(&r)
+	p_sql, _ := reader_read_string_nt(&r)
+	p_num_oids, _ := reader_read_i16(&r)
+	p_oid, _ := reader_read_u32(&r)
+	testing.expect_value(t, p_type, u8('P'))
+	testing.expect_value(t, p_pkt_len, i32(len(buf) - 1))
+	testing.expect_value(t, p_stmt, "stmt_1")
+	testing.expect_value(t, p_sql, "SELECT $1::int4")
+	testing.expect_value(t, p_num_oids, 1)
+	testing.expect_value(t, p_oid, 23)
+
+	// 2. Bind (with 1 non-null value and 1 null value)
+	clear(&buf)
+	bind_msg := Msg_Bind{
+		portal_name = "portal_1",
+		statement_name = "stmt_1",
+		param_format_codes = []Field_Format{.Text},
+		param_values = []Bind_Param{
+			{is_null = false, value = transmute([]byte)string("42")},
+			{is_null = true, value = nil},
+		},
+		result_format_codes = []Field_Format{.Binary},
+	}
+	b_len := encode_bind(&buf, bind_msg)
+	testing.expect_value(t, b_len, len(buf))
+	reader_init(&r, buf[:])
+	b_type, _ := reader_read_u8(&r)
+	b_pkt_len, _ := reader_read_i32(&r)
+	b_portal, _ := reader_read_string_nt(&r)
+	b_stmt, _ := reader_read_string_nt(&r)
+	b_num_fc, _ := reader_read_i16(&r)
+	b_fc, _ := reader_read_i16(&r)
+	b_num_pv, _ := reader_read_i16(&r)
+	b_v1_len, _ := reader_read_i32(&r)
+	b_v1_val, _ := reader_read_bytes(&r, int(b_v1_len))
+	b_v2_len, _ := reader_read_i32(&r)
+	b_num_rfc, _ := reader_read_i16(&r)
+	b_rfc, _ := reader_read_i16(&r)
+	testing.expect_value(t, b_type, u8('B'))
+	testing.expect_value(t, b_pkt_len, i32(len(buf) - 1))
+	testing.expect_value(t, b_portal, "portal_1")
+	testing.expect_value(t, b_stmt, "stmt_1")
+	testing.expect_value(t, b_num_fc, 1)
+	testing.expect_value(t, b_fc, 0)
+	testing.expect_value(t, b_num_pv, 2)
+	testing.expect_value(t, b_v1_len, 2)
+	testing.expect_value(t, string(b_v1_val), "42")
+	testing.expect_value(t, b_v2_len, -1)
+	testing.expect_value(t, b_num_rfc, 1)
+	testing.expect_value(t, b_rfc, 1)
+
+	// 3. Describe Statement & Portal
+	clear(&buf)
+	d_len := encode_describe(&buf, .Statement, "stmt_1")
+	testing.expect_value(t, d_len, len(buf))
+	reader_init(&r, buf[:])
+	d_type, _ := reader_read_u8(&r)
+	d_pkt_len, _ := reader_read_i32(&r)
+	d_target, _ := reader_read_u8(&r)
+	d_name, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, d_type, u8('D'))
+	testing.expect_value(t, d_pkt_len, i32(len(buf) - 1))
+	testing.expect_value(t, d_target, u8('S'))
+	testing.expect_value(t, d_name, "stmt_1")
+
+	// 4. Execute
+	clear(&buf)
+	e_len := encode_execute(&buf, "portal_1", 100)
+	testing.expect_value(t, e_len, len(buf))
+	reader_init(&r, buf[:])
+	e_type, _ := reader_read_u8(&r)
+	e_pkt_len, _ := reader_read_i32(&r)
+	e_portal, _ := reader_read_string_nt(&r)
+	e_rows, _ := reader_read_i32(&r)
+	testing.expect_value(t, e_type, u8('E'))
+	testing.expect_value(t, e_pkt_len, i32(len(buf) - 1))
+	testing.expect_value(t, e_portal, "portal_1")
+	testing.expect_value(t, e_rows, 100)
+
+	// 5. Sync & Flush
+	clear(&buf)
+	encode_sync(&buf)
+	encode_flush(&buf)
+	testing.expect_value(t, len(buf), 10)
+	reader_init(&r, buf[:])
+	s1_t, _ := reader_read_u8(&r)
+	s1_l, _ := reader_read_i32(&r)
+	f1_t, _ := reader_read_u8(&r)
+	f1_l, _ := reader_read_i32(&r)
+	testing.expect_value(t, s1_t, u8('S'))
+	testing.expect_value(t, s1_l, 4)
+	testing.expect_value(t, f1_t, u8('H'))
+	testing.expect_value(t, f1_l, 4)
+
+	// 6. Close
+	clear(&buf)
+	encode_close(&buf, .Portal, "portal_1")
+	testing.expect_value(t, len(buf), 1 + 4 + 1 + len("portal_1") + 1)
+	reader_init(&r, buf[:])
+	c_type, _ := reader_read_u8(&r)
+	c_pkt_len, _ := reader_read_i32(&r)
+	c_target, _ := reader_read_u8(&r)
+	c_name, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, c_type, u8('C'))
+	testing.expect_value(t, c_pkt_len, i32(len(buf) - 1))
+	testing.expect_value(t, c_target, u8('P'))
+	testing.expect_value(t, c_name, "portal_1")
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_encode_extended_query_defaults_and_edge_cases :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	// 1. Parse with unnamed statement and no parameter OIDs
+	p_len := encode_parse(&buf, "", "SELECT 1")
+	testing.expect_value(t, p_len, len(buf))
+	r: Reader
+	reader_init(&r, buf[:])
+	p_type, _ := reader_read_u8(&r)
+	p_pkt_len, _ := reader_read_i32(&r)
+	p_stmt, _ := reader_read_string_nt(&r)
+	p_sql, _ := reader_read_string_nt(&r)
+	p_num_oids, _ := reader_read_i16(&r)
+	testing.expect_value(t, p_type, u8('P'))
+	testing.expect_value(t, p_pkt_len, 4 + 1 + 9 + 2) // 4 + "\0" + "SELECT 1\0" + 2 (num_oids = 0)
+	testing.expect_value(t, p_stmt, "")
+	testing.expect_value(t, p_sql, "SELECT 1")
+	testing.expect_value(t, p_num_oids, 0)
+
+	// 2. Bind with empty values/format codes (unnamed portal & statement)
+	clear(&buf)
+	empty_bind := Msg_Bind{
+		portal_name = "",
+		statement_name = "",
+		param_format_codes = nil,
+		param_values = nil,
+		result_format_codes = nil,
+	}
+	b_len := encode_bind(&buf, empty_bind)
+	testing.expect_value(t, b_len, len(buf))
+	reader_init(&r, buf[:])
+	b_type, _ := reader_read_u8(&r)
+	b_pkt_len, _ := reader_read_i32(&r)
+	b_portal, _ := reader_read_string_nt(&r)
+	b_stmt, _ := reader_read_string_nt(&r)
+	b_num_fc, _ := reader_read_i16(&r)
+	b_num_pv, _ := reader_read_i16(&r)
+	b_num_rfc, _ := reader_read_i16(&r)
+	testing.expect_value(t, b_type, u8('B'))
+	testing.expect_value(t, b_pkt_len, 4 + 1 + 1 + 2 + 2 + 2)
+	testing.expect_value(t, b_portal, "")
+	testing.expect_value(t, b_stmt, "")
+	testing.expect_value(t, b_num_fc, 0)
+	testing.expect_value(t, b_num_pv, 0)
+	testing.expect_value(t, b_num_rfc, 0)
+
+	// 3. Describe unnamed statement and portal with default name
+	clear(&buf)
+	encode_describe(&buf, .Statement)
+	reader_init(&r, buf[:])
+	d1_type, _ := reader_read_u8(&r)
+	d1_pkt_len, _ := reader_read_i32(&r)
+	d1_target, _ := reader_read_u8(&r)
+	d1_name, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, d1_type, u8('D'))
+	testing.expect_value(t, d1_pkt_len, 4 + 1 + 1)
+	testing.expect_value(t, d1_target, u8('S'))
+	testing.expect_value(t, d1_name, "")
+
+	clear(&buf)
+	encode_describe(&buf, .Portal, "")
+	reader_init(&r, buf[:])
+	d2_type, _ := reader_read_u8(&r)
+	d2_pkt_len, _ := reader_read_i32(&r)
+	d2_target, _ := reader_read_u8(&r)
+	d2_name, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, d2_type, u8('D'))
+	testing.expect_value(t, d2_pkt_len, 4 + 1 + 1)
+	testing.expect_value(t, d2_target, u8('P'))
+	testing.expect_value(t, d2_name, "")
+
+	// 4. Execute with default args
+	clear(&buf)
+	encode_execute(&buf)
+	reader_init(&r, buf[:])
+	e_type, _ := reader_read_u8(&r)
+	e_pkt_len, _ := reader_read_i32(&r)
+	e_portal, _ := reader_read_string_nt(&r)
+	e_rows, _ := reader_read_i32(&r)
+	testing.expect_value(t, e_type, u8('E'))
+	testing.expect_value(t, e_pkt_len, 4 + 1 + 4)
+	testing.expect_value(t, e_portal, "")
+	testing.expect_value(t, e_rows, 0)
+
+	// 5. Close unnamed statement and portal
+	clear(&buf)
+	encode_close(&buf, .Statement)
+	reader_init(&r, buf[:])
+	c1_type, _ := reader_read_u8(&r)
+	c1_pkt_len, _ := reader_read_i32(&r)
+	c1_target, _ := reader_read_u8(&r)
+	c1_name, _ := reader_read_string_nt(&r)
+	testing.expect_value(t, c1_type, u8('C'))
+	testing.expect_value(t, c1_pkt_len, 4 + 1 + 1)
+	testing.expect_value(t, c1_target, u8('S'))
+	testing.expect_value(t, c1_name, "")
+
+	delete(buf)
+	buf = nil
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+

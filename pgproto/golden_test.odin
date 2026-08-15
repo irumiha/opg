@@ -106,7 +106,8 @@ test_golden_frontend_encoders :: proc(t: ^testing.T) {
 	check_fe_golden :: proc(t: ^testing.T, msg: Frontend_Message, fixture_path: string) {
 		buf: [dynamic]byte
 		defer delete(buf)
-		encode_frontend_message(&buf, msg)
+		_, enc_err := encode_frontend_message(&buf, msg)
+		testing.expect_value(t, enc_err, nil)
 
 		golden_bytes, err_file := os.read_entire_file(fixture_path, context.temp_allocator)
 		testing.expect_value(t, err_file, nil)

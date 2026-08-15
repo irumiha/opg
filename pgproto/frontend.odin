@@ -1,5 +1,15 @@
 package pgproto
 
+import "../pgerr"
+
+// PostgreSQL Frontend/Backend Protocol 3.0 magic numbers.
+PROTOCOL_VERSION_3_0 :: 196608 // 3 << 16
+SSL_REQUEST_CODE :: 80877103 // 1234 << 16 | 5679
+CANCEL_REQUEST_CODE :: 80877102 // 1234 << 16 | 5678
+
+// Wire counts in Parse/Bind are 16-bit; PostgreSQL's own limit is 65535.
+MAX_MESSAGE_FIELD_COUNT :: 65535
+
 Startup_Param :: struct {
 	name:  string,
 	value: string,
@@ -118,7 +128,7 @@ Frontend_Message :: union {
 encode_ssl_request :: proc(builder: ^[dynamic]byte) -> int {
 	start_len := len(builder)
 	pos := write_packet_header_untyped(builder)
-	write_i32(builder, 80877103)
+	write_i32(builder, SSL_REQUEST_CODE)
 	finish_packet(builder, pos)
 	return len(builder) - start_len
 }
@@ -126,7 +136,7 @@ encode_ssl_request :: proc(builder: ^[dynamic]byte) -> int {
 encode_cancel_request :: proc(builder: ^[dynamic]byte, pid: i32, secret_key: i32) -> int {
 	start_len := len(builder)
 	pos := write_packet_header_untyped(builder)
-	write_i32(builder, 80877102)
+	write_i32(builder, CANCEL_REQUEST_CODE)
 	write_i32(builder, pid)
 	write_i32(builder, secret_key)
 	finish_packet(builder, pos)
@@ -136,7 +146,7 @@ encode_cancel_request :: proc(builder: ^[dynamic]byte, pid: i32, secret_key: i32
 encode_startup :: proc(builder: ^[dynamic]byte, msg: Msg_Startup) -> int {
 	start_len := len(builder)
 	pos := write_packet_header_untyped(builder)
-	version := msg.protocol_version if msg.protocol_version != 0 else 196608
+	version := msg.protocol_version if msg.protocol_version != 0 else PROTOCOL_VERSION_3_0
 	write_i32(builder, version)
 	for p in msg.params {
 		write_string_nt(builder, p.name)
@@ -197,31 +207,59 @@ encode_parse :: proc(
 	statement_name: string,
 	query: string,
 	param_oids: []u32 = nil,
-) -> int {
+) -> (
+	bytes_written: int,
+	err: pgerr.Error,
+) {
+	if len(param_oids) > MAX_MESSAGE_FIELD_COUNT {
+		return 0, pgerr.Protocol_Error{
+			type = .Invalid_Length,
+			message = "Parse parameter OID count exceeds 65535",
+		}
+	}
 	start_len := len(builder)
 	pos := write_packet_header(builder, 'P')
 	write_string_nt(builder, statement_name)
 	write_string_nt(builder, query)
-	write_i16(builder, i16(len(param_oids)))
+	write_u16(builder, u16(len(param_oids)))
 	for oid in param_oids {
 		write_u32(builder, oid)
 	}
 	finish_packet(builder, pos)
-	return len(builder) - start_len
+	return len(builder) - start_len, nil
 }
 
-encode_bind :: proc(builder: ^[dynamic]byte, msg: Msg_Bind) -> int {
+encode_bind :: proc(builder: ^[dynamic]byte, msg: Msg_Bind) -> (bytes_written: int, err: pgerr.Error) {
+	if len(msg.param_format_codes) > MAX_MESSAGE_FIELD_COUNT {
+		return 0, pgerr.Protocol_Error{
+			type = .Invalid_Length,
+			message = "Bind format code count exceeds 65535",
+		}
+	}
+	if len(msg.param_values) > MAX_MESSAGE_FIELD_COUNT {
+		return 0, pgerr.Protocol_Error{
+			type = .Invalid_Length,
+			message = "Bind parameter count exceeds 65535",
+		}
+	}
+	if len(msg.result_format_codes) > MAX_MESSAGE_FIELD_COUNT {
+		return 0, pgerr.Protocol_Error{
+			type = .Invalid_Length,
+			message = "Bind result format code count exceeds 65535",
+		}
+	}
+
 	start_len := len(builder)
 	pos := write_packet_header(builder, 'B')
 	write_string_nt(builder, msg.portal_name)
 	write_string_nt(builder, msg.statement_name)
 
-	write_i16(builder, i16(len(msg.param_format_codes)))
+	write_u16(builder, u16(len(msg.param_format_codes)))
 	for fc in msg.param_format_codes {
 		write_i16(builder, i16(fc))
 	}
 
-	write_i16(builder, i16(len(msg.param_values)))
+	write_u16(builder, u16(len(msg.param_values)))
 	for pv in msg.param_values {
 		if pv.is_null {
 			write_i32(builder, -1)
@@ -231,13 +269,13 @@ encode_bind :: proc(builder: ^[dynamic]byte, msg: Msg_Bind) -> int {
 		}
 	}
 
-	write_i16(builder, i16(len(msg.result_format_codes)))
+	write_u16(builder, u16(len(msg.result_format_codes)))
 	for rfc in msg.result_format_codes {
 		write_i16(builder, i16(rfc))
 	}
 
 	finish_packet(builder, pos)
-	return len(builder) - start_len
+	return len(builder) - start_len, nil
 }
 
 encode_describe :: proc(
@@ -316,46 +354,52 @@ encode_copy_fail :: proc(builder: ^[dynamic]byte, message: string) -> int {
 	return len(builder) - start_len
 }
 
-encode_frontend_message :: proc(builder: ^[dynamic]byte, msg: Frontend_Message) -> int {
+encode_frontend_message :: proc(
+	builder: ^[dynamic]byte,
+	msg: Frontend_Message,
+) -> (
+	bytes_written: int,
+	err: pgerr.Error,
+) {
 	switch m in msg {
 	case Msg_Startup:
-		return encode_startup(builder, m)
+		return encode_startup(builder, m), nil
 	case Msg_SSL_Request:
-		return encode_ssl_request(builder)
+		return encode_ssl_request(builder), nil
 	case Msg_Cancel_Request:
-		return encode_cancel_request(builder, m.process_id, m.secret_key)
+		return encode_cancel_request(builder, m.process_id, m.secret_key), nil
 	case Msg_Password:
-		return encode_password(builder, m.password)
+		return encode_password(builder, m.password), nil
 	case Msg_SASL_Initial_Response:
-		return encode_sasl_initial_response(builder, m)
+		return encode_sasl_initial_response(builder, m), nil
 	case Msg_SASL_Response:
-		return encode_sasl_response(builder, m.data)
+		return encode_sasl_response(builder, m.data), nil
 	case Msg_Query:
-		return encode_query(builder, m.query)
+		return encode_query(builder, m.query), nil
 	case Msg_Parse:
 		return encode_parse(builder, m.statement_name, m.query, m.param_oids)
 	case Msg_Bind:
 		return encode_bind(builder, m)
 	case Msg_Describe:
-		return encode_describe(builder, m.target_type, m.name)
+		return encode_describe(builder, m.target_type, m.name), nil
 	case Msg_Execute:
-		return encode_execute(builder, m.portal_name, m.max_rows)
+		return encode_execute(builder, m.portal_name, m.max_rows), nil
 	case Msg_Sync:
-		return encode_sync(builder)
+		return encode_sync(builder), nil
 	case Msg_Flush:
-		return encode_flush(builder)
+		return encode_flush(builder), nil
 	case Msg_Close:
-		return encode_close(builder, m.target_type, m.name)
+		return encode_close(builder, m.target_type, m.name), nil
 	case Msg_Terminate:
-		return encode_terminate(builder)
+		return encode_terminate(builder), nil
 	case Msg_Copy_Data:
-		return encode_copy_data(builder, m.data)
+		return encode_copy_data(builder, m.data), nil
 	case Msg_Copy_Done:
-		return encode_copy_done(builder)
+		return encode_copy_done(builder), nil
 	case Msg_Copy_Fail:
-		return encode_copy_fail(builder, m.message)
+		return encode_copy_fail(builder, m.message), nil
 	}
-	return 0
+	return 0, nil
 }
 
 

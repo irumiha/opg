@@ -106,6 +106,7 @@ write_packet_header_untyped :: proc(builder: ^[dynamic]byte) -> (length_pos: int
 */
 finish_packet :: proc(builder: ^[dynamic]byte, length_pos: int) -> int {
 	packet_len := len(builder) - length_pos
+	assert(packet_len <= int(max(i32)), "pgproto: packet length exceeds i32 range")
 	raw: [4]byte
 	endian.put_i32(raw[:], .Big, i32(packet_len))
 	copy(builder[length_pos:length_pos + 4], raw[:])

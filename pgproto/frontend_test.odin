@@ -2,6 +2,7 @@ package pgproto
 
 import "core:mem"
 import "core:testing"
+import "../pgerr"
 
 /*
 	bytes converts a string to a byte slice.
@@ -206,7 +207,8 @@ test_encode_extended_query_messages :: proc(t: ^testing.T) {
 	defer delete(buf)
 
 	// 1. Parse
-	p_len := encode_parse(&buf, "stmt_1", "SELECT $1::int4", []u32{23})
+	p_len, p_parse_err := encode_parse(&buf, "stmt_1", "SELECT $1::int4", []u32{23})
+	testing.expect_value(t, p_parse_err, nil)
 	testing.expect_value(t, p_len, len(buf))
 	r: Reader
 	reader_init(&r, buf[:])
@@ -235,7 +237,8 @@ test_encode_extended_query_messages :: proc(t: ^testing.T) {
 		},
 		result_format_codes = []Field_Format{.Binary},
 	}
-	b_len := encode_bind(&buf, bind_msg)
+	b_len, b_bind_err := encode_bind(&buf, bind_msg)
+	testing.expect_value(t, b_bind_err, nil)
 	testing.expect_value(t, b_len, len(buf))
 	reader_init(&r, buf[:])
 	b_type, _ := reader_read_u8(&r)
@@ -337,7 +340,8 @@ test_encode_extended_query_defaults_and_edge_cases :: proc(t: ^testing.T) {
 	defer delete(buf)
 
 	// 1. Parse with unnamed statement and no parameter OIDs
-	p_len := encode_parse(&buf, "", "SELECT 1")
+	p_len, p_parse_err := encode_parse(&buf, "", "SELECT 1")
+	testing.expect_value(t, p_parse_err, nil)
 	testing.expect_value(t, p_len, len(buf))
 	r: Reader
 	reader_init(&r, buf[:])
@@ -361,7 +365,8 @@ test_encode_extended_query_defaults_and_edge_cases :: proc(t: ^testing.T) {
 		param_values = nil,
 		result_format_codes = nil,
 	}
-	b_len := encode_bind(&buf, empty_bind)
+	b_len, b_bind_err := encode_bind(&buf, empty_bind)
+	testing.expect_value(t, b_bind_err, nil)
 	testing.expect_value(t, b_len, len(buf))
 	reader_init(&r, buf[:])
 	b_type, _ := reader_read_u8(&r)
@@ -535,7 +540,8 @@ test_encode_frontend_message_all_variants :: proc(t: ^testing.T) {
 
 	for msg in messages {
 		clear(&buf)
-		encoded_len := encode_frontend_message(&buf, msg)
+		encoded_len, enc_err := encode_frontend_message(&buf, msg)
+		testing.expect_value(t, enc_err, nil)
 		testing.expect_value(t, encoded_len, len(buf))
 		testing.expect(t, encoded_len > 0)
 	}
@@ -592,3 +598,38 @@ test_extended_query_pipelining :: proc(t: ^testing.T) {
 }
 
 
+@(test)
+test_encoder_count_guards :: proc(t: ^testing.T) {
+	buf: [dynamic]byte
+	defer delete(buf)
+
+	too_many_oids := make([]u32, 65536, context.temp_allocator)
+	n, err := encode_parse(&buf, "s", "SELECT 1", too_many_oids)
+	testing.expect_value(t, n, 0)
+	testing.expect(t, err != nil, "expected error for 65536 param OIDs")
+	p_err, is_proto := err.(pgerr.Protocol_Error)
+	testing.expect(t, is_proto, "expected Protocol_Error")
+	testing.expect_value(t, p_err.type, pgerr.Protocol_Error_Type.Invalid_Length)
+	testing.expect_value(t, len(buf), 0) // builder must be untouched on error
+
+	too_many_params := make([]Bind_Param, 65536, context.temp_allocator)
+	n_b, err_b := encode_bind(&buf, Msg_Bind{param_values = too_many_params})
+	testing.expect_value(t, n_b, 0)
+	testing.expect(t, err_b != nil, "expected error for 65536 bind params")
+	testing.expect_value(t, len(buf), 0)
+
+	// Dispatcher propagates the error.
+	n_d, err_d := encode_frontend_message(&buf, Msg_Parse{query = "q", param_oids = too_many_oids})
+	testing.expect_value(t, n_d, 0)
+	testing.expect(t, err_d != nil, "expected dispatcher to propagate encoder error")
+	testing.expect_value(t, len(buf), 0)
+
+	// Boundary: exactly 65535 format codes is legal (count wire-encodes as u16 0xFFFF).
+	max_codes := make([]Field_Format, 65535, context.temp_allocator)
+	n_ok, err_ok := encode_bind(&buf, Msg_Bind{param_format_codes = max_codes})
+	testing.expect_value(t, err_ok, nil)
+	testing.expect(t, n_ok > 0, "expected successful encode at the 65535 boundary")
+	// Count field lives right after 'B' + length(4) + portal "" (1) + statement "" (1): bytes 7..8.
+	testing.expect_value(t, buf[7], u8(0xFF))
+	testing.expect_value(t, buf[8], u8(0xFF))
+}

@@ -327,9 +327,11 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 	msg_e, n_e, err_e := parse_message(var_err[:])
 	testing.expect_value(t, err_e, nil)
 	testing.expect_value(t, n_e, len(var_err))
-	pg_err, is_err := msg_e.(pgerr.Postgres_Error)
-	testing.expect(t, is_err, "expected pgerr.Postgres_Error")
+	err_resp, is_err := msg_e.(Msg_Error_Response)
+	testing.expect(t, is_err, "expected Msg_Error_Response")
+	pg_err := err_resp.error
 	testing.expect_value(t, pg_err.severity, "ERROR")
+	testing.expect_value(t, pg_err.severity_unlocalized, "ERROR")
 	testing.expect_value(t, pg_err.code, "42P01")
 	testing.expect_value(t, pg_err.message, "relation \"nonexistent\" does not exist")
 	testing.expect_value(t, pg_err.position, "15")
@@ -380,9 +382,11 @@ test_parse_error_and_notice_messages :: proc(t: ^testing.T) {
 	msg_all, n_all, err_all := parse_message(var_all[:])
 	testing.expect_value(t, err_all, nil)
 	testing.expect_value(t, n_all, len(var_all))
-	all_err, is_all_err := msg_all.(pgerr.Postgres_Error)
-	testing.expect(t, is_all_err, "expected pgerr.Postgres_Error for all fields")
+	all_resp, is_all_err := msg_all.(Msg_Error_Response)
+	testing.expect(t, is_all_err, "expected Msg_Error_Response for all fields")
+	all_err := all_resp.error
 	testing.expect_value(t, all_err.severity, "FATAL")
+	testing.expect_value(t, all_err.severity_unlocalized, "FATAL")
 	testing.expect_value(t, all_err.code, "28P01")
 	testing.expect_value(t, all_err.message, "password authentication failed")
 	testing.expect_value(t, all_err.detail, "User does not exist")
@@ -425,10 +429,11 @@ test_parse_error_and_notice_edge_cases :: proc(t: ^testing.T) {
 
 	msg_unk, _, err_unk := parse_message(var_unk[:])
 	testing.expect_value(t, err_unk, nil)
-	unk_err, is_unk := msg_unk.(pgerr.Postgres_Error)
-	testing.expect(t, is_unk, "expected pgerr.Postgres_Error")
-	testing.expect_value(t, unk_err.severity, "ERROR")
-	testing.expect_value(t, unk_err.message, "msg")
+	unk_resp, is_unk := msg_unk.(Msg_Error_Response)
+	testing.expect(t, is_unk, "expected Msg_Error_Response")
+	testing.expect_value(t, unk_resp.error.severity, "ERROR")
+	testing.expect_value(t, unk_resp.error.severity_unlocalized, "")
+	testing.expect_value(t, unk_resp.error.message, "msg")
 
 	// 2. Unterminated field string
 	var_unterm: [dynamic]byte

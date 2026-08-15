@@ -70,23 +70,24 @@ Auth_Error :: struct {
 	from the PostgreSQL engine inside an ErrorResponse ('E') message.
 */
 Postgres_Error :: struct {
-	severity:          string, // 'S' / 'V' (FATAL, ERROR, PANIC, etc.)
-	code:              string, // 'C' SQLSTATE error code (e.g. "42P01", "28P01")
-	message:           string, // 'M' Primary human-readable error message
-	detail:            string, // 'D' Optional secondary error detail
-	hint:              string, // 'H' Optional suggestion what to do
-	position:          string, // 'P' Decimal ASCII integer index into query string
-	internal_position: string, // 'p' Internal query position
-	internal_query:    string, // 'q' Internal query text
-	where_context:     string, // 'W' Call stack / context
-	schema_name:       string, // 's' Schema name
-	table_name:        string, // 't' Table name
-	column_name:       string, // 'c' Column name
-	data_type_name:    string, // 'd' Data type name
-	constraint_name:   string, // 'n' Constraint name
-	file:              string, // 'F' Source file name in PostgreSQL engine
-	line:              string, // 'L' Source line number in PostgreSQL engine
-	routine:           string, // 'R' Source routine name in PostgreSQL engine
+	severity:             string, // 'S' Localized severity (FATAL, ERROR, PANIC, etc.)
+	severity_unlocalized: string, // 'V' Non-localized severity (PostgreSQL 9.6+)
+	code:                 string, // 'C' SQLSTATE error code (e.g. "42P01", "28P01")
+	message:              string, // 'M' Primary human-readable error message
+	detail:               string, // 'D' Optional secondary error detail
+	hint:                 string, // 'H' Optional suggestion what to do
+	position:             string, // 'P' Decimal ASCII integer index into query string
+	internal_position:    string, // 'p' Internal query position
+	internal_query:       string, // 'q' Internal query text
+	where_context:        string, // 'W' Call stack / context
+	schema_name:          string, // 's' Schema name
+	table_name:           string, // 't' Table name
+	column_name:          string, // 'c' Column name
+	data_type_name:       string, // 'd' Data type name
+	constraint_name:      string, // 'n' Constraint name
+	file:                 string, // 'F' Source file name in PostgreSQL engine
+	line:                 string, // 'L' Source line number in PostgreSQL engine
+	routine:              string, // 'R' Source routine name in PostgreSQL engine
 }
 
 // Master tagged union for all driver errors

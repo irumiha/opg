@@ -449,9 +449,11 @@ test_golden_backend_parsers :: proc(t: ^testing.T) {
 	{
 		msg, n := load_and_parse(t, "pgproto/tests_golden_files/be_error_response.bin")
 		testing.expect(t, n > 0, "expected positive bytes consumed")
-		pg_err, ok := msg.(pgerr.Postgres_Error)
-		testing.expect(t, ok, "expected pgerr.Postgres_Error")
+		err_resp, ok := msg.(Msg_Error_Response)
+		testing.expect(t, ok, "expected Msg_Error_Response")
+		pg_err := err_resp.error
 		testing.expect_value(t, pg_err.severity, "ERROR")
+		testing.expect_value(t, pg_err.severity_unlocalized, "ERROR")
 		testing.expect_value(t, pg_err.code, "42P01")
 		testing.expect_value(t, pg_err.message, "relation \"nonexistent\" does not exist")
 		testing.expect_value(t, pg_err.position, "15")

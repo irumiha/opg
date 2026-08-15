@@ -374,7 +374,7 @@ parse_error_or_notice_fields :: proc(payload: []byte) -> (pg_err: pgerr.Postgres
 		case 'S':
 			pg_err.severity = str_val
 		case 'V':
-			pg_err.severity = str_val
+			pg_err.severity_unlocalized = str_val
 		case 'C':
 			pg_err.code = str_val
 		case 'M':
@@ -781,7 +781,7 @@ parse_message :: proc(
 
 	case .Error_Response:
 		err_resp := parse_error_or_notice_fields(payload) or_return
-		return err_resp, total_msg_len, nil
+		return Msg_Error_Response{error = err_resp}, total_msg_len, nil
 
 	case .Notice_Response:
 		notice_err := parse_error_or_notice_fields(payload) or_return

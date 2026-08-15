@@ -120,6 +120,10 @@ Msg_Data_Row :: struct {
 // Error, Notice & Notification Payloads
 // ----------------------------------------------------------------------------
 
+Msg_Error_Response :: struct {
+	error: pgerr.Postgres_Error,
+}
+
 Msg_Notice_Response :: struct {
 	error: pgerr.Postgres_Error,
 }
@@ -204,6 +208,7 @@ Backend_Message :: union {
 	Msg_Copy_Out_Response,
 	Msg_Data_Row,
 	Msg_Empty_Query_Response,
+	Msg_Error_Response,
 	Msg_Function_Call_Response,
 	Msg_Negotiate_Protocol_Version,
 	Msg_No_Data,
@@ -215,5 +220,4 @@ Backend_Message :: union {
 	Msg_Portal_Suspended,
 	Msg_Ready_For_Query,
 	Msg_Row_Description,
-	pgerr.Postgres_Error,
 }

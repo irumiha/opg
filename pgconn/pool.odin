@@ -56,7 +56,7 @@ default_pool_connect :: proc(data: rawptr, config: Conn_Config, allocator: mem.A
 
 // Callers must hold pool.mutex.
 pool_total_conns :: proc(pool: ^Pool) -> int {
-	return len(pool.available) + len(pool.in_use) + pool.pending_dials
+	return len(pool.available) + len(pool.in_use) + pool.pending_dials + pool.pending_resets
 }
 
 pool_destroy_conn :: proc(pool: ^Pool, conn: ^Conn) {
@@ -266,10 +266,40 @@ pool_release :: proc(
 	pool_destroy closes the pool: wakes all blocked acquirers (they fail with
 	Pool_Closed), waits until borrowed connections are released and in-flight
 	dials/resets finish, then closes every idle connection and frees all pool
-	memory. Safe on nil. Must be called exactly once per pool.
+	memory. Safe on nil. Idempotent: subsequent calls are harmless no-ops.
+
+	NOTE: This procedure BLOCKS until every acquired connection has been
+	released via pool_release and all pending dials/resets have completed.
+	Callers must ensure that no goroutine holds a connection indefinitely,
+	otherwise pool_destroy will block forever.
 */
 pool_destroy :: proc(pool: ^Pool) {
 	if pool == nil do return
+
+	alloc := pool.allocator
+
+	// N4: idempotency guard — a second call after the pool has already been
+	// destroyed is a no-op. We must check under the lock because is_closed
+	// is shared state.
+	sync.mutex_lock(&pool.mutex)
+	if pool.is_closed {
+		sync.mutex_unlock(&pool.mutex)
+		return
+	}
+	sync.mutex_unlock(&pool.mutex)
+
+	// Snapshot idle connections and free pool list memory while holding the
+	// lock, but close the connections AFTER releasing it: conn_close writes a
+	// Terminate packet over TCP and can block if the socket buffer is full,
+	// which would stall every concurrent pool_acquire/pool_release.
+	to_close: [dynamic]^Conn
+	defer if len(to_close) > 0 {
+		for conn in to_close {
+			conn_close(conn)
+			free(conn, alloc)
+		}
+		delete(to_close)
+	}
 
 	sync.mutex_lock(&pool.mutex)
 	pool.is_closed = true
@@ -279,12 +309,13 @@ pool_destroy :: proc(pool: ^Pool) {
 		sync.cond_wait(&pool.cond, &pool.mutex)
 	}
 
+	to_close = make([dynamic]^Conn, 0, len(pool.available), context.temp_allocator)
 	for conn in pool.available {
-		pool_destroy_conn(pool, conn)
+		append(&to_close, conn)
 	}
 	delete(pool.available)
 	delete(pool.in_use)
 	sync.mutex_unlock(&pool.mutex)
 
-	free(pool, pool.allocator)
+	free(pool, alloc)
 }

@@ -1752,3 +1752,169 @@ test_conn_query_dead_connection :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "expected Net_Error")
 	testing.expect_value(t, net_err.type, pgerr.Net_Error_Type.Socket_Closed)
 }
+
+/*
+	C2 regression: a `SET` statement causes PostgreSQL to re-push a
+	ParameterStatus ('S') before CommandComplete. The execution loop must
+	update conn.parameters rather than aborting with Unexpected_Message.
+*/
+@(test)
+test_conn_query_handles_parameter_status :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	// Pre-seed an existing TimeZone parameter so the replace path is also
+	// exercised (delete old value, store new).
+	old_key := strings.clone("TimeZone", context.allocator)
+	old_val := strings.clone("UTC", context.allocator)
+	conn.parameters[old_key] = old_val
+
+	// ParameterStatus 'TimeZone' = 'America/New_York' (len = 4 + 9 + 17 = 30)
+	param_status := []byte{
+		'S', 0, 0, 0, 30,
+		'T', 'i', 'm', 'e', 'Z', 'o', 'n', 'e', 0,
+		'A', 'm', 'e', 'r', 'i', 'c', 'a', '/', 'N', 'e', 'w', '_', 'Y', 'o', 'r', 'k', 0,
+	}
+	cmd_complete := []byte{'C', 0, 0, 0, 17, 'S', 'E', 'T', ' ', 'T', 'I', 'M', 'E', 'Z', 'O', 'N', 'E', 0}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, param_status)
+	append(&mock.read_chunks, cmd_complete)
+	append(&mock.read_chunks, rfq)
+
+	err := conn_query(conn, "SET TIMEZONE = 'America/New_York';")
+	testing.expect(t, err == nil, "expected query success, not Unexpected_Message")
+	testing.expect_value(t, conn.status, Conn_Status.Ready)
+	testing.expect_value(t, conn.parameters["TimeZone"], "America/New_York")
+
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+/*
+	H3 regression: an empty/comment-only SQL string via the extended protocol
+	produces EmptyQueryResponse ('I') instead of ParseComplete/CommandComplete.
+	The extended loop must accept it rather than aborting with Unexpected_Message.
+*/
+@(test)
+test_conn_exec_params_empty_query :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	empty_response := []byte{'I', 0, 0, 0, 4}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, empty_response)
+	append(&mock.read_chunks, rfq)
+
+	params := []pgproto.Bind_Param{}
+	err := conn_exec_params(conn = conn, query = "-- comment only", params = params)
+	testing.expect(t, err == nil, "expected empty query success, not Unexpected_Message")
+	testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+/*
+	H2 regression: when conn_prepare pipelines Close+Parse and the Parse
+	fails (e.g. syntax error), the server has already closed the old named
+	statement on CloseComplete. The client cache must drop the stale entry at
+	CloseComplete so a later conn_exec_prepared cannot reference a server-side
+	statement that no longer exists.
+*/
+@(test)
+test_conn_prepare_parse_failure_after_close_removes_cache :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	conn.prepared_statements = make(map[string]Prepared_Statement, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	// 1. Prepare "s1" successfully so the cache holds an entry.
+	parse_ok := []byte{'1', 0, 0, 0, 4}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+	append(&mock.read_chunks, parse_ok)
+	append(&mock.read_chunks, rfq)
+	err1 := conn_prepare(conn, "s1", "SELECT $1::int4;", []u32{23})
+	testing.expect(t, err1 == nil, "expected first prepare success")
+	testing.expect(t, "s1" in conn.prepared_statements, "expected s1 cached after first prepare")
+
+	// 2. Re-prepare "s1" with a syntax error. The driver pipelines
+	//    Close('S', "s1") + Parse("s1", "SYNTAX ERROR") + Sync.
+	//    Server replies: CloseComplete ('3'), ErrorResponse, ReadyForQuery('E').
+	close_ok := []byte{'3', 0, 0, 0, 4}
+	err_packet := []byte{
+		'E', 0, 0, 0, 33,
+		'S', 'E', 'R', 'R', 'O', 'R', 0,
+		'C', '4', '2', '6', '0', '1', 0,
+		'M', 's', 'y', 'n', 't', 'a', 'x', ' ', 'e', 'r', 'r', 'o', 'r', 0,
+		0,
+	}
+	rfq_failed := []byte{'Z', 0, 0, 0, 5, 'E'}
+	append(&mock.read_chunks, close_ok)
+	append(&mock.read_chunks, err_packet)
+	append(&mock.read_chunks, rfq_failed)
+
+	err2 := conn_prepare(conn, "s1", "SYNTAX ERROR;", nil)
+	testing.expect(t, err2 != nil, "expected Parse failure")
+	pg_err, ok := err2.(pgerr.Postgres_Error)
+	testing.expect(t, ok, "expected Postgres_Error")
+	testing.expect_value(t, pg_err.code, "42601")
+	_ = pg_err // cloned into context.temp_allocator by the query loop; not tracked here
+
+	// The stale entry must be gone: the server closed "s1" on CloseComplete,
+	// so the cache must not keep a reference to a non-existent server statement.
+	testing.expect(t, !("s1" in conn.prepared_statements), "stale statement must be removed after Close+Parse failure")
+	testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
+
+	// Note: the recorded Parse error is cloned into context.temp_allocator by
+	// the execution loop (same pattern as every query error); it is not
+	// tracked by `track` and is reclaimed with the temp allocator.
+
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

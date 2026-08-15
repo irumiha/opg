@@ -661,3 +661,198 @@ test_pool_stress_concurrent_acquire_release :: proc(t: ^testing.T) {
 	mock_dialer_destroy(&dialer)
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+// ----------------------------------------------------------------------------
+// C3 regression: max_conns must be respected while a reset is in flight.
+// ----------------------------------------------------------------------------
+
+/*
+	Blocking_Reset_Transport is a mock transport whose read blocks on a gate
+	mutex until release_read() is called. Used to hold the ROLLBACK reset
+	window open so a concurrent pool_acquire can be observed.
+*/
+Blocking_Reset_Transport :: struct {
+	gate:        sync.Mutex,
+	gate_open:   bool,
+	written:     [dynamic]byte,
+	is_closed:   bool,
+	allocator:   mem.Allocator,
+}
+
+blocking_reset_init :: proc(b: ^Blocking_Reset_Transport, allocator := context.allocator) {
+	b.allocator = allocator
+	b.written = make([dynamic]byte, allocator)
+}
+
+blocking_reset_destroy :: proc(b: ^Blocking_Reset_Transport) {
+	delete(b.written)
+}
+
+blocking_reset_release_read :: proc(b: ^Blocking_Reset_Transport) {
+	sync.mutex_lock(&b.gate)
+	b.gate_open = true
+	sync.mutex_unlock(&b.gate)
+}
+
+blocking_reset_read :: proc(transport: rawptr, buf: []byte) -> (int, pgerr.Error) {
+	b := (^Blocking_Reset_Transport)(transport)
+	if b.is_closed {
+		return 0, pgerr.Net_Error{type = .Socket_Closed}
+	}
+	// Block until the test opens the gate.
+	sync.mutex_lock(&b.gate)
+	for !b.gate_open {
+		sync.mutex_unlock(&b.gate)
+		time.sleep(time.Millisecond)
+		sync.mutex_lock(&b.gate)
+	}
+	sync.mutex_unlock(&b.gate)
+	// Once open, return EOF so ROLLBACK read fails and the conn is destroyed.
+	return 0, pgerr.Net_Error{type = .Socket_Closed}
+}
+
+blocking_reset_write :: proc(transport: rawptr, data: []byte) -> (int, pgerr.Error) {
+	b := (^Blocking_Reset_Transport)(transport)
+	if b.is_closed {
+		return 0, pgerr.Net_Error{type = .Socket_Closed}
+	}
+	for c in data {
+		append(&b.written, c)
+	}
+	return len(data), nil
+}
+
+blocking_reset_close :: proc(transport: rawptr) {
+	b := (^Blocking_Reset_Transport)(transport)
+	b.is_closed = true
+}
+
+blocking_reset_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: time.Duration) -> pgerr.Error {
+	return nil
+}
+
+make_blocking_reset_transport :: proc(b: ^Blocking_Reset_Transport) -> Stream_Transport {
+	return Stream_Transport{
+		data = b,
+		read = blocking_reset_read,
+		write = blocking_reset_write,
+		close = blocking_reset_close,
+		set_deadlines = blocking_reset_set_deadlines,
+	}
+}
+
+/*
+	c3_acquire_state carries the result of a concurrent pool_acquire run
+	while a reset is held open by the gate opener thread.
+*/
+C3_Acquire_State :: struct {
+	pool:      ^Pool,
+	conn:      ^Conn,
+	err:       pgerr.Error,
+	completed: bool,
+}
+
+c3_acquire_proc :: proc(s: ^C3_Acquire_State) {
+	conn, err := pool_acquire(s.pool, 5 * time.Second)
+	s.conn = conn
+	s.err = err
+	s.completed = true
+	if conn != nil && err == nil {
+		_ = pool_release(s.pool, conn)
+	}
+}
+
+/*
+	C3_Release_State carries the result of pool_release run on a worker thread.
+*/
+C3_Release_State :: struct {
+	pool:       ^Pool,
+	conn:       ^Conn,
+	release_err: pgerr.Error,
+	released:   bool,
+}
+
+/*
+	c3_release_proc runs pool_release on a worker thread. pool_release enters
+	the ROLLBACK reset path and blocks on the blocking transport's gate until
+	the test opens it, so the main thread can observe the in-flight reset.
+*/
+c3_release_proc :: proc(s: ^C3_Release_State) {
+	s.release_err = pool_release(s.pool, s.conn)
+	s.released = true
+}
+
+@(test)
+test_pool_max_conns_respected_during_pending_reset :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	dialer: Mock_Pool_Dialer
+	mock_dialer_init(&dialer)
+
+	pool, err := pool_init(make_test_pool_config(&dialer, 1, 1))
+	testing.expect(t, err == nil, "expected pool_init success")
+
+	c1, err1 := pool_acquire(pool)
+	testing.expect(t, err1 == nil, "expected acquire success")
+	testing.expect_value(t, dialer.dial_count, 1)
+
+	// Swap the conn's transport for a blocking one so the ROLLBACK read stalls.
+	block: Blocking_Reset_Transport
+	blocking_reset_init(&block, context.allocator)
+	stream_destroy(&c1.stream)
+	stream_init(&c1.stream, make_blocking_reset_transport(&block), allocator = context.allocator)
+
+	// Mark in-transaction so pool_release runs the ROLLBACK reset path.
+	c1.status = .In_Transaction
+
+	// Worker R: run pool_release on a worker thread. It removes c1 from
+	// in_use, bumps pending_resets, drops the lock, and blocks on the
+	// ROLLBACK read (gate closed) for the whole reset window.
+	release_state := C3_Release_State{pool = pool, conn = c1}
+	th_r := thread.create_and_start_with_poly_data(&release_state, c3_release_proc)
+	time.sleep(20 * time.Millisecond) // let R enter the reset and block on the gate
+
+	// Worker A: concurrent acquire started AFTER the reset is in flight.
+	// With the C3 fix, pending_resets is counted in pool_total_conns so A
+	// must block at capacity. Without the fix, A over-dials past max_conns.
+	acquire_state := C3_Acquire_State{pool = pool}
+	th_a := thread.create_and_start_with_poly_data(&acquire_state, c3_acquire_proc)
+	time.sleep(30 * time.Millisecond) // let A either block or over-dial
+
+	// Transient snapshot before unblocking the reset.
+	transient_completed := acquire_state.completed
+	transient_dial_count := dialer.dial_count
+
+	// Open the gate: the blocked ROLLBACK read returns EOF, the conn is
+	// destroyed, pending_resets drops to 0, and A is woken to dial a fresh conn.
+	blocking_reset_release_read(&block)
+
+	thread.join(th_r)
+	thread.destroy(th_r)
+	thread.join(th_a)
+	thread.destroy(th_a)
+
+	testing.expect(t, release_state.released, "release worker must complete")
+	testing.expect(t, release_state.release_err == nil, "expected release success")
+
+	// Transient assertions (the crux of C3): with pending_resets counted, A
+	// neither completed nor over-dialed during the reset window.
+	testing.expect(t, !transient_completed, "concurrent acquire must block while reset is in flight")
+	testing.expect_value(t, transient_dial_count, 1)
+
+	// Final state: A completed after the reset finished, dialing exactly one
+	// fresh connection (the destroyed conn was replaced).
+	testing.expect(t, acquire_state.completed, "concurrent acquire must complete once reset finishes")
+	testing.expect(t, acquire_state.err == nil, "expected acquire to succeed after reset")
+	testing.expect_value(t, dialer.dial_count, 2)
+	testing.expect_value(t, pool.pending_resets, 0)
+	testing.expect_value(t, len(pool.in_use), 0)
+
+	pool_destroy(pool)
+	mock_dialer_destroy(&dialer)
+	blocking_reset_destroy(&block)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}

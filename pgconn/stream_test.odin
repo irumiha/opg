@@ -912,5 +912,47 @@ test_stream_large_packet_buffer_expansion :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+/*
+	M4 regression: a malicious or buggy server sending a length header that
+	exceeds MAX_PACKET_SIZE must be rejected with Protocol_Error{.Invalid_Length}
+	instead of attempting a multi-GB allocation.
+*/
+@(test)
+test_stream_read_rejects_oversized_packet :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	// CommandComplete ('C') with payload length = MAX_PACKET_SIZE + 100.
+	// payload_len is i32 big-endian; total_packet_len = 1 + payload_len.
+	oversize_len := i32(MAX_PACKET_SIZE + 100)
+	header := make([dynamic]byte, context.temp_allocator)
+	defer delete(header)
+	append(&header, 'C')
+	append(&header, byte((oversize_len >> 24) & 0xFF))
+	append(&header, byte((oversize_len >> 16) & 0xFF))
+	append(&header, byte((oversize_len >> 8) & 0xFF))
+	append(&header, byte(oversize_len & 0xFF))
+	append(&mock.read_chunks, header[:])
+
+	transport := make_mock_transport(&mock)
+	stream: Stream_Buffer
+	stream_init(&stream, transport)
+
+	_, err := stream_read_message(&stream)
+	testing.expect(t, err != nil, "expected error for oversized packet")
+	proto_err, ok := err.(pgerr.Protocol_Error)
+	testing.expect(t, ok, "expected Protocol_Error")
+	testing.expect_value(t, proto_err.type, pgerr.Protocol_Error_Type.Invalid_Length)
+
+	stream_destroy(&stream)
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
 
 

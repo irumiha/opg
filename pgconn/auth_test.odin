@@ -44,9 +44,10 @@ test_auth_scram_escape_username :: proc(t: ^testing.T) {
 	testing.expect_value(t, e1, "user=2Cname=3Dtest")
 	delete(e1, context.allocator)
 
+	// No escaping needed: scram_escape_username returns the input string by
+	// reference (no allocation), so there is nothing to delete.
 	e2 := scram_escape_username("plain_user", context.allocator)
 	testing.expect_value(t, e2, "plain_user")
-	delete(e2, context.allocator)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }

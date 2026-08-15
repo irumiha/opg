@@ -21,3 +21,5 @@ Protocol_Error_Type :: pgerr.Protocol_Error_Type
 Auth_Error          :: pgerr.Auth_Error
 Auth_Error_Type     :: pgerr.Auth_Error_Type
 Postgres_Error      :: pgerr.Postgres_Error
+Pool_Error          :: pgerr.Pool_Error
+Pool_Error_Type     :: pgerr.Pool_Error_Type

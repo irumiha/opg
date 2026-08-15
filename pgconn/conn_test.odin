@@ -350,6 +350,7 @@ test_conn_handshake_error_response :: proc(t: ^testing.T) {
 	case pgerr.Postgres_Error:
 		testing.expect_value(t, e.code, "28P01")
 		testing.expect_value(t, e.message, "auth failed")
+		pgerr.postgres_error_destroy(e, context.allocator)
 	case:
 		testing.expect(t, false, "expected Postgres_Error")
 	}
@@ -914,6 +915,7 @@ test_conn_handshake_server_error_response :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "expected Postgres_Error")
 	testing.expect_value(t, pg_err.code, "28P01")
 	testing.expect_value(t, pg_err.message, "password authentication failed")
+	pgerr.postgres_error_destroy(pg_err, context.allocator)
 
 	mock_transport_destroy(&mock)
 	testing.expect_value(t, len(track.allocation_map), 0)
@@ -948,13 +950,77 @@ test_conn_connect_invalid_port_or_host :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_conn_handshake_error_survives_temp_allocator_free :: proc(t: ^testing.T) {
+	// Regression for C1: Postgres_Error cloned during conn_handshake must be
+	// allocated with the persistent `allocator`, NOT `context.temp_allocator`,
+	// so the error message survives the caller freeing its temp arena.
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	backing: [16384]byte
+	temp_arena: mem.Arena
+	mem.arena_init(&temp_arena, backing[:])
+	temp_alloc := mem.arena_allocator(&temp_arena)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	err_builder := make([dynamic]byte, temp_alloc)
+	append(&err_builder, 'E')
+	append(&err_builder, 0, 0, 0, 0)
+	append(&err_builder, 'S')
+	append(&err_builder, "FATAL")
+	append(&err_builder, 0)
+	append(&err_builder, 'C')
+	append(&err_builder, "28P01")
+	append(&err_builder, 0)
+	append(&err_builder, 'M')
+	append(&err_builder, "password authentication failed")
+	append(&err_builder, 0)
+	append(&err_builder, 0)
+	endian.put_i32(err_builder[1:5], .Big, i32(len(err_builder) - 1))
+	append(&mock.read_chunks, err_builder[:])
+
+	transport := make_mock_transport(&mock)
+	config := Conn_Config{
+		host = "localhost",
+		port = 5432,
+		user = "postgres",
+		password = "wrongpassword",
+	}
+
+	// Run the handshake with temp_arena as the temp allocator.
+	context.temp_allocator = temp_alloc
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	testing.expect(t, conn == nil, "expected nil conn on startup error")
+	testing.expect(t, err != nil, "expected error")
+
+	// Simulate the caller freeing its temp arena after the call returns.
+	mem.arena_free_all(&temp_arena)
+
+	// The error strings must still be valid (allocated with `allocator`).
+	pg_err, ok := err.(pgerr.Postgres_Error)
+	testing.expect(t, ok, "expected Postgres_Error")
+	testing.expect_value(t, pg_err.code, "28P01")
+	testing.expect_value(t, pg_err.message, "password authentication failed")
+	pgerr.postgres_error_destroy(pg_err, context.allocator)
+
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
 test_conn_connect_default_port_invalid_host :: proc(t: ^testing.T) {
 	track: mem.Tracking_Allocator
 	mem.tracking_allocator_init(&track, context.allocator)
 	defer mem.tracking_allocator_destroy(&track)
 	context.allocator = mem.tracking_allocator(&track)
 
-	// Port <= 0 defaults to 5432, invalid host name
+	// Port <= 0 defaults to 5432, invalid host name. A malformed address like
+	// "256.256.256.256" fails endpoint parsing/DNS, which map_dial_error surfaces
+	// as DNS_Resolution_Failed rather than a generic Connection_Refused.
 	config := Conn_Config{
 		host = "256.256.256.256",
 		port = 0,
@@ -967,7 +1033,7 @@ test_conn_connect_default_port_invalid_host :: proc(t: ^testing.T) {
 
 	#partial switch e in err {
 	case pgerr.Net_Error:
-		testing.expect_value(t, e.type, pgerr.Net_Error_Type.Connection_Refused)
+		testing.expect_value(t, e.type, pgerr.Net_Error_Type.DNS_Resolution_Failed)
 	case:
 		testing.expect(t, false, "expected Net_Error")
 	}

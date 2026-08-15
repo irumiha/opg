@@ -45,6 +45,8 @@ Protocol_Error_Type :: enum {
 
 Protocol_Error :: struct {
 	type:        Protocol_Error_Type,
+	// `message` is a static string literal set at the call site (never
+	// allocated, never borrowed from the wire buffer); it must not be freed.
 	message:     string,
 	byte_offset: int,
 }
@@ -62,6 +64,11 @@ Auth_Error_Type :: enum {
 
 Auth_Error :: struct {
 	type:    Auth_Error_Type,
+	// `message` is either a static string literal (set at the call site,
+	// never freed) or a clone allocated by the caller with the persistent
+	// allocator (e.g. the `e=` attribute echoed from a SCRAM server-final
+	// message — see scram_verify_server_final). Inspect the type to decide;
+	// the SCRAM error-message variants own a heap clone the caller must free.
 	message: string,
 }
 

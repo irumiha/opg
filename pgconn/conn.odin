@@ -63,6 +63,50 @@ conn_is_alive :: proc(conn: ^Conn) -> bool {
 	return conn.status == .Ready || conn.status == .In_Transaction || conn.status == .Failed_Transaction
 }
 
+/*
+	conn_apply_parameter_status records (or replaces) a server-pushed
+	ParameterStatus into conn.parameters using the persistent allocator.
+	Called from the handshake and every execution loop, since the server may
+	re-push a ParameterStatus after `SET` statements before CommandComplete.
+*/
+conn_apply_parameter_status :: proc(conn: ^Conn, name, value: string) {
+	if old_val, exists := conn.parameters[name]; exists {
+		delete(old_val, conn.allocator)
+		conn.parameters[name] = strings.clone(value, conn.allocator)
+	} else {
+		key_clone := strings.clone(name, conn.allocator)
+		val_clone := strings.clone(value, conn.allocator)
+		conn.parameters[key_clone] = val_clone
+	}
+}
+
+/*
+	map_dial_error translates a core:net dial failure into a specific pgerr
+	Net_Error so callers can distinguish DNS failures, unreachable hosts, and
+	connection refusals instead of always seeing .Connection_Refused.
+*/
+map_dial_error :: proc(nerr: net.Network_Error) -> pgerr.Net_Error {
+	#partial switch e in nerr {
+	case net.DNS_Error:
+		return pgerr.Net_Error{type = .DNS_Resolution_Failed, raw_net_error = nerr}
+	case net.Resolve_Error, net.Parse_Endpoint_Error:
+		return pgerr.Net_Error{type = .DNS_Resolution_Failed, raw_net_error = nerr}
+	case net.Dial_Error:
+		#partial switch e {
+		case .Host_Unreachable, .Network_Unreachable:
+			return pgerr.Net_Error{type = .Host_Unreachable, raw_net_error = nerr}
+		case .Timeout, .Would_Block:
+			return pgerr.Net_Error{type = .Timeout, raw_net_error = nerr}
+		case .Refused, .Reset:
+			return pgerr.Net_Error{type = .Connection_Refused, raw_net_error = nerr}
+		case:
+			return pgerr.Net_Error{type = .Connection_Refused, raw_net_error = nerr}
+		}
+	case:
+		return pgerr.Net_Error{type = .Connection_Refused, raw_net_error = nerr}
+	}
+}
+
 conn_handshake :: proc(
 	c: ^Conn,
 	config: Conn_Config,
@@ -125,14 +169,7 @@ conn_handshake :: proc(
 			}
 
 		case pgproto.Msg_Parameter_Status:
-			if old_val, exists := c.parameters[m.name]; exists {
-				delete(old_val, allocator)
-				c.parameters[m.name] = strings.clone(m.value, allocator)
-			} else {
-				key_clone := strings.clone(m.name, allocator)
-				val_clone := strings.clone(m.value, allocator)
-				c.parameters[key_clone] = val_clone
-			}
+			conn_apply_parameter_status(c, m.name, m.value)
 
 		case pgproto.Msg_Backend_Key_Data:
 			c.backend_pid = m.process_id
@@ -155,7 +192,7 @@ conn_handshake :: proc(
 			return c, nil
 
 		case pgproto.Msg_Error_Response:
-			cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+			cloned_err, _ := pgerr.postgres_error_clone(m.error, allocator)
 			return nil, cloned_err
 
 		case:
@@ -199,10 +236,7 @@ conn_connect :: proc(
 
 	socket, nerr := net.dial_tcp_from_hostname_and_port_string(endpoint)
 	if nerr != nil {
-		return nil, pgerr.Net_Error{
-			type = .Connection_Refused,
-			raw_net_error = nerr,
-		}
+		return nil, map_dial_error(nerr)
 	}
 
 	c := new(Conn, allocator)
@@ -312,7 +346,7 @@ conn_cancel :: proc(conn: ^Conn) -> pgerr.Error {
 
 	socket, nerr := net.dial_tcp_from_hostname_and_port_string(endpoint)
 	if nerr != nil {
-		return pgerr.Net_Error{type = .Connection_Refused, raw_net_error = nerr}
+		return map_dial_error(nerr)
 	}
 
 	tdata: TCP_Transport_Data

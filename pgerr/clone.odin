@@ -7,8 +7,8 @@ import "core:strings"
 	postgres_error_clone deep-copies every string field of a Postgres_Error into
 	`allocator`. Parsed Postgres_Error values borrow from the network read buffer;
 	clone anything that must outlive the next socket read.
-	On allocation failure, already-cloned fields are NOT freed — use an arena or
-	tracking allocator if partial-failure cleanup matters.
+	On allocation failure, already-cloned fields are freed via the deferred
+	destroy below (no partial leak).
 */
 postgres_error_clone :: proc(
 	e: Postgres_Error,
@@ -17,6 +17,10 @@ postgres_error_clone :: proc(
 	res: Postgres_Error,
 	err: mem.Allocator_Error,
 ) {
+	defer if err != nil {
+		postgres_error_destroy(res, allocator)
+		res = Postgres_Error{}
+	}
 	res.severity = strings.clone(e.severity, allocator) or_return
 	res.severity_unlocalized = strings.clone(e.severity_unlocalized, allocator) or_return
 	res.code = strings.clone(e.code, allocator) or_return

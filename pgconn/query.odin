@@ -68,6 +68,9 @@ conn_query :: proc(
 		case pgproto.Msg_Empty_Query_Response:
 			// No action needed for empty queries
 
+		case pgproto.Msg_Parameter_Status:
+			conn_apply_parameter_status(conn, m.name, m.value)
+
 		case pgproto.Msg_Notice_Response:
 			if conn.on_notice != nil {
 				conn.on_notice(conn.on_notice_data, m)

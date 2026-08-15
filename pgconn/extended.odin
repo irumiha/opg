@@ -28,8 +28,6 @@ conn_exec_params :: proc(
 		return pgerr.Net_Error{type = .Socket_Closed}
 	}
 
-	conn.status = .Busy
-
 	pipeline_buf := make([dynamic]byte, context.temp_allocator)
 	defer delete(pipeline_buf)
 
@@ -45,6 +43,7 @@ conn_exec_params :: proc(
 	pgproto.encode_execute(&pipeline_buf, "", 0)
 	pgproto.encode_sync(&pipeline_buf)
 
+	conn.status = .Busy
 	stream_write_messages(&conn.stream, pipeline_buf[:]) or_return
 
 	var_proceed := true
@@ -56,6 +55,12 @@ conn_exec_params :: proc(
 		#partial switch m in msg {
 		case pgproto.Msg_Parse_Complete, pgproto.Msg_Bind_Complete, pgproto.Msg_No_Data:
 			// Successful pipeline checkpoints
+
+		case pgproto.Msg_Empty_Query_Response:
+			// Empty query (e.g. comment-only SQL) via extended protocol
+
+		case pgproto.Msg_Parameter_Status:
+			conn_apply_parameter_status(conn, m.name, m.value)
 
 		case pgproto.Msg_Row_Description:
 			if on_desc != nil && var_recorded_err == nil {
@@ -125,8 +130,6 @@ conn_prepare :: proc(
 		return pgerr.Net_Error{type = .Socket_Closed}
 	}
 
-	conn.status = .Busy
-
 	pipeline_buf := make([dynamic]byte, context.temp_allocator)
 	defer delete(pipeline_buf)
 
@@ -139,6 +142,7 @@ conn_prepare :: proc(
 	pgproto.encode_parse(&pipeline_buf, name, query, param_oids) or_return
 	pgproto.encode_sync(&pipeline_buf)
 
+	conn.status = .Busy
 	stream_write_messages(&conn.stream, pipeline_buf[:]) or_return
 
 	var_recorded_err: pgerr.Error = nil
@@ -148,10 +152,27 @@ conn_prepare :: proc(
 
 		#partial switch m in msg {
 		case pgproto.Msg_Close_Complete:
-			// Old statement (if any) closed
+			// The server has closed the named statement. Remove the stale cache
+			// entry NOW so a subsequent Parse failure cannot leave the client
+			// referencing a server-side statement that no longer exists.
+			if name != "" && conn.prepared_statements != nil && name in conn.prepared_statements {
+				old := conn.prepared_statements[name]
+				delete(old.name, conn.allocator)
+				delete(old.query, conn.allocator)
+				if old.param_oids != nil {
+					delete(old.param_oids, conn.allocator)
+				}
+				delete_key(&conn.prepared_statements, name)
+			}
 
 		case pgproto.Msg_Parse_Complete:
 			// Successfully parsed
+
+		case pgproto.Msg_Empty_Query_Response:
+			// Empty query (e.g. comment-only SQL) during prepare
+
+		case pgproto.Msg_Parameter_Status:
+			conn_apply_parameter_status(conn, m.name, m.value)
 
 		case pgproto.Msg_Notice_Response:
 			if conn.on_notice != nil {
@@ -234,8 +255,6 @@ conn_exec_prepared :: proc(
 		return pgerr.Net_Error{type = .Socket_Closed}
 	}
 
-	conn.status = .Busy
-
 	pipeline_buf := make([dynamic]byte, context.temp_allocator)
 	defer delete(pipeline_buf)
 
@@ -250,6 +269,7 @@ conn_exec_prepared :: proc(
 	pgproto.encode_execute(&pipeline_buf, "", 0)
 	pgproto.encode_sync(&pipeline_buf)
 
+	conn.status = .Busy
 	stream_write_messages(&conn.stream, pipeline_buf[:]) or_return
 
 	var_proceed := true
@@ -261,6 +281,12 @@ conn_exec_prepared :: proc(
 		#partial switch m in msg {
 		case pgproto.Msg_Bind_Complete, pgproto.Msg_No_Data:
 			// Successful pipeline checkpoints
+
+		case pgproto.Msg_Empty_Query_Response:
+			// Empty query (e.g. comment-only SQL) via prepared statement
+
+		case pgproto.Msg_Parameter_Status:
+			conn_apply_parameter_status(conn, m.name, m.value)
 
 		case pgproto.Msg_Row_Description:
 			if on_desc != nil && var_recorded_err == nil {
@@ -324,14 +350,13 @@ conn_close_statement :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 		return pgerr.Net_Error{type = .Socket_Closed}
 	}
 
-	conn.status = .Busy
-
 	pipeline_buf := make([dynamic]byte, context.temp_allocator)
 	defer delete(pipeline_buf)
 
 	pgproto.encode_close(&pipeline_buf, .Statement, name)
 	pgproto.encode_sync(&pipeline_buf)
 
+	conn.status = .Busy
 	stream_write_messages(&conn.stream, pipeline_buf[:]) or_return
 
 	var_recorded_err: pgerr.Error = nil
@@ -342,6 +367,12 @@ conn_close_statement :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 		#partial switch m in msg {
 		case pgproto.Msg_Close_Complete:
 			// Statement closed
+
+		case pgproto.Msg_Empty_Query_Response:
+			// No-op for close statement
+
+		case pgproto.Msg_Parameter_Status:
+			conn_apply_parameter_status(conn, m.name, m.value)
 
 		case pgproto.Msg_Notice_Response:
 			if conn.on_notice != nil {
@@ -400,14 +431,13 @@ conn_close_portal :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 		return pgerr.Net_Error{type = .Socket_Closed}
 	}
 
-	conn.status = .Busy
-
 	pipeline_buf := make([dynamic]byte, context.temp_allocator)
 	defer delete(pipeline_buf)
 
 	pgproto.encode_close(&pipeline_buf, .Portal, name)
 	pgproto.encode_sync(&pipeline_buf)
 
+	conn.status = .Busy
 	stream_write_messages(&conn.stream, pipeline_buf[:]) or_return
 
 	var_recorded_err: pgerr.Error = nil
@@ -418,6 +448,12 @@ conn_close_portal :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 		#partial switch m in msg {
 		case pgproto.Msg_Close_Complete:
 			// Portal closed
+
+		case pgproto.Msg_Empty_Query_Response:
+			// No-op for close portal
+
+		case pgproto.Msg_Parameter_Status:
+			conn_apply_parameter_status(conn, m.name, m.value)
 
 		case pgproto.Msg_Notice_Response:
 			if conn.on_notice != nil {

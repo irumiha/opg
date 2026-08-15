@@ -7,6 +7,15 @@ import "core:time"
 import "../pgerr"
 import "../pgproto"
 
+/*
+	MAX_PACKET_SIZE is the upper bound on a single backend message total
+	length (1 type byte + payload). PostgreSQL has no hard protocol limit, but
+	the largest realistic message is a multi-megabyte DataRow; 128 MiB is far
+	beyond any legitimate value while still bounding the allocation a malicious
+	or buggy server could request via the 4-byte length header.
+*/
+MAX_PACKET_SIZE :: 1 << 27 // 128 MiB
+
 // Stream_Transport provides polymorphic I/O over TCP sockets or dynamic TLS streams.
 Stream_Transport :: struct {
 	data:          rawptr,
@@ -187,6 +196,15 @@ stream_read_message :: proc(
 
 			total_packet_len := 1 + int(payload_len)
 
+			// M4: reject absurd lengths before attempting a multi-GB allocation.
+			if total_packet_len > MAX_PACKET_SIZE {
+				return nil, pgerr.Protocol_Error{
+					type = .Invalid_Length,
+					message = "Backend message length exceeds MAX_PACKET_SIZE",
+					byte_offset = s.read_offset + 1,
+				}
+			}
+
 			// 2. If entire packet is in buffer, parse and return
 			if unread >= total_packet_len {
 				packet_slice := s.buf[s.read_offset : s.read_offset + total_packet_len]
@@ -207,9 +225,10 @@ stream_read_message :: proc(
 				if s.read_offset > 0 {
 					stream_compact(s)
 				}
-				required_capacity = s.write_offset + (total_packet_len - (s.write_offset - s.read_offset))
-				if required_capacity > len(s.buf) {
-					resize(&s.buf, max(len(s.buf) * 2, required_capacity))
+				// After compaction read_offset is 0, so the needed capacity is
+				// simply the full packet length.
+				if total_packet_len > len(s.buf) {
+					resize(&s.buf, max(len(s.buf) * 2, total_packet_len))
 				}
 			}
 		} else {

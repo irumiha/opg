@@ -60,8 +60,21 @@ scram_state_destroy :: proc(state: ^Scram_State) {
 
 /*
 	scram_escape_username escapes ',' -> '=2C' and '=' -> '=3D' per RFC 5802.
+	If neither character is present the input is returned unchanged without
+	allocating a builder.
 */
 scram_escape_username :: proc(user: string, allocator := context.temp_allocator) -> string {
+	needs_escape := false
+	for i in 0 ..< len(user) {
+		if user[i] == ',' || user[i] == '=' {
+			needs_escape = true
+			break
+		}
+	}
+	if !needs_escape {
+		return user
+	}
+
 	b := strings.builder_make(allocator)
 	for i in 0 ..< len(user) {
 		ch := user[i]
@@ -299,15 +312,15 @@ scram_verify_server_final :: proc(
 		}
 	}
 
-	// Compare decoded signature with state.server_signature in constant time
-	matches := true
+	// Compare decoded signature with state.server_signature in constant time.
+	// XOR-accumulate all bytes so the comparison time is data-independent and
+	// cannot be short-circuited or auto-vectorized into an early exit.
+	diff: u8 = 0
 	for i in 0 ..< 32 {
-		if decoded_sig[i] != state.server_signature[i] {
-			matches = false
-		}
+		diff |= decoded_sig[i] ~ state.server_signature[i]
 	}
 
-	if !matches {
+	if diff != 0 {
 		return pgerr.Auth_Error{
 			type = .SCRAM_Server_Signature_Mismatch,
 			message = "Server SCRAM signature mismatch",

@@ -43,6 +43,10 @@ SSL_ERROR_WANT_READ :: 2
 SSL_ERROR_WANT_WRITE :: 3
 SSL_ERROR_ZERO_RETURN :: 6
 
+// Upper bound on consecutive WANT_READ / WANT_WRITE retries. Each retry
+// sleeps 1 ms, so 5000 retries ≈ 5 seconds before returning Net_Error{.Timeout}.
+TLS_MAX_WANT_RETRIES :: 5000
+
 openssl: OpenSSL_API
 
 /*
@@ -132,6 +136,7 @@ tls_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr
 	if len(buf) == 0 {
 		return 0, nil
 	}
+	want_retries := 0
 	for {
 		ret := openssl.SSL_read(data.ssl, raw_data(buf), c.int(len(buf)))
 		if ret > 0 {
@@ -140,7 +145,12 @@ tls_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr
 		code := openssl.SSL_get_error(data.ssl, ret)
 		switch code {
 		case SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
-			continue // blocking fd: retry
+			want_retries += 1
+			if want_retries > TLS_MAX_WANT_RETRIES {
+				return 0, pgerr.Net_Error{type = .Timeout}
+			}
+			time.sleep(time.Millisecond)
+			continue
 		case SSL_ERROR_ZERO_RETURN:
 			return 0, pgerr.Net_Error{type = .Socket_Closed}
 		}
@@ -151,16 +161,23 @@ tls_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr
 tls_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written: int, err: pgerr.Error) {
 	data := (^TLS_Transport_Data)(transport)
 	total := 0
+	want_retries := 0
 	for total < len(data_bytes) {
 		remaining := data_bytes[total:]
 		ret := openssl.SSL_write(data.ssl, raw_data(remaining), c.int(len(remaining)))
 		if ret > 0 {
 			total += int(ret)
+			want_retries = 0 // successful write resets the counter
 			continue
 		}
 		code := openssl.SSL_get_error(data.ssl, ret)
 		if code == SSL_ERROR_WANT_READ || code == SSL_ERROR_WANT_WRITE {
-			continue // blocking fd: retry
+			want_retries += 1
+			if want_retries > TLS_MAX_WANT_RETRIES {
+				return total, pgerr.Net_Error{type = .Timeout}
+			}
+			time.sleep(time.Millisecond)
+			continue
 		}
 		if code == SSL_ERROR_ZERO_RETURN {
 			return total, pgerr.Net_Error{type = .Socket_Closed}

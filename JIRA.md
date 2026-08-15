@@ -135,7 +135,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-104] `pgproto` Golden Vector Test Suite & Coverage Verification ($\ge 95\%$)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgproto`
 - **Files**:
   - `pgproto/tests_golden_files/*.bin`

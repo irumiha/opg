@@ -323,7 +323,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-301] PostgreSQL Data Types $\leftrightarrow$ Odin Type Binary/Text Codecs
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgorm`
 - **Files**:
   - `pgorm/types.odin`

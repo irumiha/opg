@@ -870,6 +870,112 @@ test_conn_cancel_with_transport_write_error :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
 
+@(test)
+test_conn_handshake_server_error_response :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	// ErrorResponse: 'E', len, 'S', "FATAL\0", 'C', "28P01\0", 'M', "password authentication failed\0", '\0'
+	err_builder := make([dynamic]byte, context.temp_allocator)
+	append(&err_builder, 'E')
+	append(&err_builder, 0, 0, 0, 0)
+	append(&err_builder, 'S')
+	append(&err_builder, "FATAL")
+	append(&err_builder, 0)
+	append(&err_builder, 'C')
+	append(&err_builder, "28P01")
+	append(&err_builder, 0)
+	append(&err_builder, 'M')
+	append(&err_builder, "password authentication failed")
+	append(&err_builder, 0)
+	append(&err_builder, 0)
+	endian.put_i32(err_builder[1:5], .Big, i32(len(err_builder) - 1))
+
+	append(&mock.read_chunks, err_builder[:])
+
+	transport := make_mock_transport(&mock)
+	config := Conn_Config{
+		host = "localhost",
+		port = 5432,
+		user = "postgres",
+		password = "wrongpassword",
+	}
+
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	testing.expect(t, conn == nil, "expected nil connection on startup error")
+	testing.expect(t, err != nil, "expected error")
+
+	pg_err, ok := err.(pgerr.Postgres_Error)
+	testing.expect(t, ok, "expected Postgres_Error")
+	testing.expect_value(t, pg_err.code, "28P01")
+	testing.expect_value(t, pg_err.message, "password authentication failed")
+
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_connect_invalid_port_or_host :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// Dialing an invalid port on loopback or unreachable endpoint
+	config := Conn_Config{
+		host = "127.0.0.1",
+		port = 1, // Port 1 (tcpmux) is usually closed
+		user = "postgres",
+	}
+
+	conn, err := conn_connect(config, context.allocator)
+	testing.expect(t, conn == nil, "expected nil conn on dial failure")
+	testing.expect(t, err != nil, "expected dial error")
+
+	#partial switch e in err {
+	case pgerr.Net_Error:
+		testing.expect_value(t, e.type, pgerr.Net_Error_Type.Connection_Refused)
+	case:
+		testing.expect(t, false, "expected Net_Error")
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_connect_default_port_invalid_host :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	// Port <= 0 defaults to 5432, invalid host name
+	config := Conn_Config{
+		host = "256.256.256.256",
+		port = 0,
+		user = "postgres",
+	}
+
+	conn, err := conn_connect(config, context.allocator)
+	testing.expect(t, conn == nil, "expected nil conn on invalid host")
+	testing.expect(t, err != nil, "expected net error")
+
+	#partial switch e in err {
+	case pgerr.Net_Error:
+		testing.expect_value(t, e.type, pgerr.Net_Error_Type.Connection_Refused)
+	case:
+		testing.expect(t, false, "expected Net_Error")
+	}
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+
 
 
 

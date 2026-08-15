@@ -209,7 +209,7 @@ Layer 4: opg (Public Facade & End-to-End Integration)
 ---
 
 ### [OPG-203] Startup Sequence & Connection State Machine
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgconn`
 - **Files**:
   - `pgconn/conn.odin`

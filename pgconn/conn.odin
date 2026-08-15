@@ -60,7 +60,8 @@ conn_is_alive :: proc(conn: ^Conn) -> bool {
 	return conn.status == .Ready || conn.status == .In_Transaction || conn.status == .Failed_Transaction
 }
 
-conn_connect_with_transport :: proc(
+conn_handshake :: proc(
+	c: ^Conn,
 	config: Conn_Config,
 	transport: Stream_Transport,
 	allocator := context.allocator,
@@ -68,14 +69,6 @@ conn_connect_with_transport :: proc(
 	conn: ^Conn,
 	err: pgerr.Error,
 ) {
-	c := new(Conn, allocator)
-	defer if err != nil {
-		if c != nil {
-			conn_close(c)
-			free(c, allocator)
-		}
-	}
-
 	c.allocator = allocator
 	c.config = config
 	c.status = .Connecting
@@ -168,6 +161,56 @@ conn_connect_with_transport :: proc(
 			}
 		}
 	}
+}
+
+conn_connect_with_transport :: proc(
+	config: Conn_Config,
+	transport: Stream_Transport,
+	allocator := context.allocator,
+) -> (
+	conn: ^Conn,
+	err: pgerr.Error,
+) {
+	c := new(Conn, allocator)
+	defer if err != nil {
+		if c != nil {
+			conn_close(c)
+			free(c, allocator)
+		}
+	}
+
+	return conn_handshake(c, config, transport, allocator)
+}
+
+conn_connect :: proc(
+	config: Conn_Config,
+	allocator := context.allocator,
+) -> (
+	conn: ^Conn,
+	err: pgerr.Error,
+) {
+	port := config.port
+	if port <= 0 do port = 5432
+	endpoint := fmt.tprintf("%s:%d", config.host, port)
+
+	socket, nerr := net.dial_tcp_from_hostname_and_port_string(endpoint)
+	if nerr != nil {
+		return nil, pgerr.Net_Error{
+			type = .Connection_Refused,
+			raw_net_error = nerr,
+		}
+	}
+
+	c := new(Conn, allocator)
+	defer if err != nil {
+		if c != nil {
+			conn_close(c)
+			free(c, allocator)
+		}
+	}
+
+	transport := make_tcp_transport(&c.tcp_data, socket)
+	return conn_handshake(c, config, transport, allocator)
 }
 
 conn_close :: proc(conn: ^Conn) {

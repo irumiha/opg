@@ -268,6 +268,22 @@ decode_binary_uuid :: proc(data: []byte) -> (val: [16]u8, ok: bool) {
 	return val, true
 }
 
+decode_binary_timestamp :: proc(data: []byte) -> (val: time.Time, ok: bool) {
+	if len(data) != 8 do return val, false
+	pg_micros := endian.get_i64(data, .Big) or_return
+	unix_micros := pg_micros + 946_684_800_000_000
+	unix_nanos := unix_micros * 1000
+	return time.from_nanoseconds(unix_nanos), true
+}
+
+decode_binary_date :: proc(data: []byte) -> (val: time.Time, ok: bool) {
+	if len(data) != 4 do return val, false
+	pg_days := endian.get_i32(data, .Big) or_return
+	unix_days := i64(pg_days) + 10957
+	unix_nanos := unix_days * 86400 * 1_000_000_000
+	return time.from_nanoseconds(unix_nanos), true
+}
+
 decode_binary_jsonb :: proc(data: []byte, allocator := context.temp_allocator) -> (val: string, ok: bool) {
 	if len(data) < 1 || data[0] != 0x01 do return "", false
 	return decode_text_string(data[1:], allocator)

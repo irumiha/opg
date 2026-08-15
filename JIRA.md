@@ -348,7 +348,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-302] Reflection Struct & Slice Mapper (`core:reflect`)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgorm`
 - **Files**:
   - `pgorm/mapper.odin`

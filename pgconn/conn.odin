@@ -27,6 +27,10 @@ Conn_Config :: struct {
 	connect_timeout:  time.Duration,
 	read_timeout:     time.Duration,
 	write_timeout:    time.Duration,
+	on_notice:        Notice_Handler,
+	on_notice_data:   rawptr,
+	on_notification:  Notification_Handler,
+	on_notif_data:    rawptr,
 }
 
 Notice_Handler :: #type proc(user_data: rawptr, notice: pgproto.Msg_Notice_Response)
@@ -74,6 +78,10 @@ conn_connect_with_transport :: proc(
 	c.config = config
 	c.status = .Connecting
 	c.parameters = make(map[string]string, 16, allocator)
+	c.on_notice = config.on_notice
+	c.on_notice_data = config.on_notice_data
+	c.on_notification = config.on_notification
+	c.on_notif_data = config.on_notif_data
 	stream_init(&c.stream, transport, allocator = allocator)
 
 	// 1. Build and send StartupMessage

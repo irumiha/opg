@@ -1,8 +1,13 @@
 package pgconn
 
+import "core:crypto/hmac"
+import "core:crypto/pbkdf2"
+import "core:encoding/base64"
+import "core:encoding/endian"
 import "core:mem"
 import "core:strings"
 import "core:testing"
+import "core:time"
 import "../pgerr"
 import "../pgproto"
 
@@ -383,6 +388,405 @@ test_conn_handshake_unexpected_message :: proc(t: ^testing.T) {
 		testing.expect_value(t, e.type, pgerr.Protocol_Error_Type.Unexpected_Message)
 	case:
 		testing.expect(t, false, "expected Protocol_Error")
+	}
+
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+// Scram_Server_Mock simulates a PostgreSQL backend performing SCRAM-SHA-256 authentication
+Scram_Server_Mock :: struct {
+	password:            string,
+	salt:                []byte,
+	step:                int,
+	client_nonce:        string,
+	server_first:        string,
+	auth_message:        string,
+	read_buffer:         [dynamic]byte,
+	read_offset:         int,
+	written_bytes:       [dynamic]byte,
+	is_closed:           bool,
+	corrupt_signature:   bool,
+	allocator:           mem.Allocator,
+}
+
+scram_server_mock_init :: proc(m: ^Scram_Server_Mock, password: string, allocator := context.allocator) {
+	m.password = password
+	m.salt = []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	m.step = 0
+	m.allocator = allocator
+	m.read_buffer = make([dynamic]byte, allocator)
+	m.written_bytes = make([dynamic]byte, allocator)
+}
+
+scram_server_mock_destroy :: proc(m: ^Scram_Server_Mock) {
+	delete(m.read_buffer)
+	delete(m.written_bytes)
+	if len(m.client_nonce) > 0 do delete(m.client_nonce, m.allocator)
+	if len(m.server_first) > 0 do delete(m.server_first, m.allocator)
+	if len(m.auth_message) > 0 do delete(m.auth_message, m.allocator)
+}
+
+scram_mock_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr.Error) {
+	m := (^Scram_Server_Mock)(transport)
+	if m.is_closed {
+		return 0, pgerr.Net_Error{type = .Socket_Closed}
+	}
+
+	if m.read_offset >= len(m.read_buffer) {
+		clear(&m.read_buffer)
+		m.read_offset = 0
+
+		switch m.step {
+		case 0:
+			// 1. Send AuthenticationSASL offering SCRAM-SHA-256
+			auth_sasl := []byte{
+				'R', 0, 0, 0, 23,
+				0, 0, 0, 10,
+				'S', 'C', 'R', 'A', 'M', '-', 'S', 'H', 'A', '-', '2', '5', '6', 0, 0,
+			}
+			append(&m.read_buffer, ..auth_sasl)
+			m.step = 1
+
+		case 1:
+			// Client responded with SASL Initial Response. Find "r=" to get client nonce.
+			written_str := string(m.written_bytes[:])
+			r_idx := strings.index(written_str, ",r=")
+			if r_idx == -1 {
+				r_idx = strings.index(written_str, "r=")
+			}
+			if r_idx != -1 {
+				r_start := r_idx + (3 if strings.has_prefix(written_str[r_idx:], ",r=") else 2)
+				r_end := strings.index_byte(written_str[r_start:], 0)
+				client_nonce_str: string
+				if r_end != -1 {
+					client_nonce_str = written_str[r_start : r_start+r_end]
+				} else {
+					client_nonce_str = written_str[r_start:]
+				}
+				m.client_nonce = strings.clone(client_nonce_str, m.allocator)
+			}
+
+			combined_nonce := strings.concatenate({m.client_nonce, "SERVEREXTRA1234567890"}, context.temp_allocator)
+			salt_b64 := base64.encode(m.salt, allocator = context.temp_allocator)
+			m.server_first = strings.concatenate({"r=", combined_nonce, ",s=", salt_b64, ",i=4096"}, m.allocator)
+
+			append(&m.read_buffer, 'R')
+			append(&m.read_buffer, 0, 0, 0, 0)
+			append(&m.read_buffer, 0, 0, 0, 11)
+			append(&m.read_buffer, m.server_first)
+			endian.put_i32(m.read_buffer[1:5], .Big, i32(len(m.read_buffer) - 1))
+			m.step = 2
+
+		case 2:
+			// Client responded with SASL Response (client-final).
+			// Compute auth-message and ServerSignature.
+			combined_nonce := strings.concatenate({m.client_nonce, "SERVEREXTRA1234567890"}, context.temp_allocator)
+			client_first_bare := strings.concatenate({"n=postgres,r=", m.client_nonce}, context.temp_allocator)
+			client_final_without_proof := strings.concatenate({"c=biws,r=", combined_nonce}, context.temp_allocator)
+			m.auth_message = strings.concatenate({client_first_bare, ",", m.server_first, ",", client_final_without_proof}, m.allocator)
+
+			server_final: string
+			if m.corrupt_signature {
+				server_final = "v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+			} else {
+				salted_password: [32]byte
+				pbkdf2.derive(.SHA256, transmute([]byte)m.password, m.salt, 4096, salted_password[:])
+				server_key: [32]byte
+				hmac.sum(.SHA256, server_key[:], transmute([]byte)string("Server Key"), salted_password[:])
+				server_sig: [32]byte
+				hmac.sum(.SHA256, server_sig[:], transmute([]byte)m.auth_message, server_key[:])
+				b64_sig := base64.encode(server_sig[:], allocator = context.temp_allocator)
+				server_final = strings.concatenate({"v=", b64_sig}, context.temp_allocator)
+			}
+
+			append(&m.read_buffer, 'R')
+			append(&m.read_buffer, 0, 0, 0, 0)
+			append(&m.read_buffer, 0, 0, 0, 12)
+			append(&m.read_buffer, server_final)
+			endian.put_i32(m.read_buffer[1:5], .Big, i32(len(m.read_buffer) - 1))
+			m.step = 3
+
+		case 3:
+			// Send AuthenticationOk, ParameterStatuses, BackendKeyData, ReadyForQuery
+			append(&m.read_buffer, 'R', 0, 0, 0, 8, 0, 0, 0, 0)
+
+			append_param :: proc(buf: ^[dynamic]byte, k, v: string) {
+				start := len(buf)
+				append(buf, 'S', 0, 0, 0, 0)
+				append(buf, k)
+				append(buf, 0)
+				append(buf, v)
+				append(buf, 0)
+				endian.put_i32(buf[start+1:start+5], .Big, i32(len(buf) - start - 1))
+			}
+
+			append_param(&m.read_buffer, "server_version", "16.1")
+			append_param(&m.read_buffer, "client_encoding", "UTF8")
+			append_param(&m.read_buffer, "TimeZone", "UTC")
+			append_param(&m.read_buffer, "integer_datetimes", "on")
+
+			// BackendKeyData: pid=1234, secret=5678
+			append(&m.read_buffer, 'K', 0, 0, 0, 12, 0, 0, 4, 210, 0, 0, 22, 46)
+
+			// ReadyForQuery ('I')
+			append(&m.read_buffer, 'Z', 0, 0, 0, 5, 'I')
+			m.step = 4
+
+		case:
+			return 0, pgerr.Net_Error{type = .Socket_Closed}
+		}
+	}
+
+	remaining := m.read_buffer[m.read_offset:]
+	to_copy := min(len(buf), len(remaining))
+	copy(buf[:to_copy], remaining[:to_copy])
+	m.read_offset += to_copy
+	return to_copy, nil
+}
+
+scram_mock_write :: proc(transport: rawptr, data: []byte) -> (int, pgerr.Error) {
+	m := (^Scram_Server_Mock)(transport)
+	if m.is_closed {
+		return 0, pgerr.Net_Error{type = .Socket_Closed}
+	}
+	for b in data {
+		append(&m.written_bytes, b)
+	}
+	return len(data), nil
+}
+
+scram_mock_close :: proc(transport: rawptr) {
+	m := (^Scram_Server_Mock)(transport)
+	m.is_closed = true
+}
+
+scram_mock_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: time.Duration) -> pgerr.Error {
+	return nil
+}
+
+make_scram_mock_transport :: proc(m: ^Scram_Server_Mock) -> Stream_Transport {
+	return Stream_Transport{
+		data = m,
+		read = scram_mock_read,
+		write = scram_mock_write,
+		close = scram_mock_close,
+		set_deadlines = scram_mock_set_deadlines,
+	}
+}
+
+@(test)
+test_conn_handshake_scram_and_parameters :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Scram_Server_Mock
+	scram_server_mock_init(&mock, "secretpassword", context.allocator)
+
+	transport := make_scram_mock_transport(&mock)
+	config := Conn_Config{
+		host = "localhost",
+		port = 5432,
+		user = "postgres",
+		password = "secretpassword",
+		database = "testdb",
+		application_name = "test_app",
+	}
+
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	testing.expect(t, err == nil, "expected SCRAM handshake success")
+	testing.expect(t, conn != nil, "expected non-nil conn")
+
+	if conn != nil {
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Idle)
+		testing.expect_value(t, conn.backend_pid, 1234)
+		testing.expect_value(t, conn.backend_secret, 5678)
+		testing.expect_value(t, conn.parameters["server_version"], "16.1")
+		testing.expect_value(t, conn.parameters["client_encoding"], "UTF8")
+		testing.expect_value(t, conn.parameters["TimeZone"], "UTC")
+		testing.expect_value(t, conn.parameters["integer_datetimes"], "on")
+
+		conn_close(conn)
+		free(conn, context.allocator)
+	}
+
+	scram_server_mock_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+@(test)
+test_conn_handshake_scram_server_signature_mismatch :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Scram_Server_Mock
+	scram_server_mock_init(&mock, "secretpassword", context.allocator)
+	mock.corrupt_signature = true
+
+	transport := make_scram_mock_transport(&mock)
+	config := Conn_Config{
+		host = "localhost",
+		port = 5432,
+		user = "postgres",
+		password = "secretpassword",
+		database = "testdb",
+	}
+
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	testing.expect(t, conn == nil, "expected conn to be nil on SCRAM signature mismatch")
+	testing.expect(t, err != nil, "expected error on SCRAM signature mismatch")
+
+	#partial switch e in err {
+	case pgerr.Auth_Error:
+		testing.expect_value(t, e.type, pgerr.Auth_Error_Type.SCRAM_Server_Signature_Mismatch)
+	case:
+		testing.expect(t, false, "expected Auth_Error")
+	}
+
+	scram_server_mock_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+Test_Notice_Context :: struct {
+	received_notice: bool,
+	notice_message:  string,
+	notice_severity: string,
+}
+
+on_test_notice :: proc(user_data: rawptr, notice: pgproto.Msg_Notice_Response) {
+	ctx := (^Test_Notice_Context)(user_data)
+	ctx.received_notice = true
+	ctx.notice_message = notice.error.message
+	ctx.notice_severity = notice.error.severity
+}
+
+@(test)
+test_conn_notice_callback :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	auth_ok := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}
+
+	// Notice message: 'N', len, 'S', "NOTICE\0", 'M', "test notice message\0", '\0'
+	notice_builder := make([dynamic]byte, context.temp_allocator)
+	append(&notice_builder, 'N')
+	append(&notice_builder, 0, 0, 0, 0)
+	append(&notice_builder, 'S')
+	append(&notice_builder, "NOTICE")
+	append(&notice_builder, 0)
+	append(&notice_builder, 'M')
+	append(&notice_builder, "test notice message")
+	append(&notice_builder, 0)
+	append(&notice_builder, 0)
+	endian.put_i32(notice_builder[1:5], .Big, i32(len(notice_builder) - 1))
+
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, auth_ok)
+	append(&mock.read_chunks, notice_builder[:])
+	append(&mock.read_chunks, rfq)
+
+	transport := make_mock_transport(&mock)
+	notice_ctx: Test_Notice_Context
+	config := Conn_Config{
+		host = "localhost",
+		port = 5432,
+		user = "postgres",
+		on_notice = on_test_notice,
+		on_notice_data = &notice_ctx,
+	}
+
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	testing.expect(t, err == nil, "expected handshake success")
+	testing.expect(t, conn != nil, "expected conn not nil")
+	if conn != nil {
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		testing.expect(t, notice_ctx.received_notice, "expected notice callback to be called")
+		testing.expect_value(t, notice_ctx.notice_message, "test notice message")
+		testing.expect_value(t, notice_ctx.notice_severity, "NOTICE")
+		conn_close(conn)
+		free(conn, context.allocator)
+	}
+
+	mock_transport_destroy(&mock)
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+Test_Notification_Context :: struct {
+	received_notification: bool,
+	channel:               string,
+	payload:               string,
+	pid:                   i32,
+}
+
+on_test_notification :: proc(user_data: rawptr, notification: pgproto.Msg_Notification_Response) {
+	ctx := (^Test_Notification_Context)(user_data)
+	ctx.received_notification = true
+	ctx.channel = notification.channel
+	ctx.payload = notification.payload
+	ctx.pid = notification.process_id
+}
+
+@(test)
+test_conn_notification_callback :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	auth_ok := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}
+
+	// Notification message: 'A', len, pid=1234, "chat_channel\0", "new_message\0"
+	notif_builder := make([dynamic]byte, context.temp_allocator)
+	append(&notif_builder, 'A')
+	append(&notif_builder, 0, 0, 0, 0)
+	append(&notif_builder, 0, 0, 4, 210) // pid 1234
+	append(&notif_builder, "chat_channel")
+	append(&notif_builder, 0)
+	append(&notif_builder, "new_message")
+	append(&notif_builder, 0)
+	endian.put_i32(notif_builder[1:5], .Big, i32(len(notif_builder) - 1))
+
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, auth_ok)
+	append(&mock.read_chunks, notif_builder[:])
+	append(&mock.read_chunks, rfq)
+
+	transport := make_mock_transport(&mock)
+	notif_ctx: Test_Notification_Context
+	config := Conn_Config{
+		host = "localhost",
+		port = 5432,
+		user = "postgres",
+		on_notification = on_test_notification,
+		on_notif_data = &notif_ctx,
+	}
+
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	testing.expect(t, err == nil, "expected handshake success")
+	testing.expect(t, conn != nil, "expected conn not nil")
+	if conn != nil {
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		testing.expect(t, notif_ctx.received_notification, "expected notification callback to be called")
+		testing.expect_value(t, notif_ctx.channel, "chat_channel")
+		testing.expect_value(t, notif_ctx.payload, "new_message")
+		testing.expect_value(t, notif_ctx.pid, 1234)
+		conn_close(conn)
+		free(conn, context.allocator)
 	}
 
 	mock_transport_destroy(&mock)

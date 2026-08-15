@@ -317,3 +317,64 @@ test_make_tcp_transport :: proc(t: ^testing.T) {
 	testing.expect_value(t, tdata.read_timeout, 2 * time.Second)
 	testing.expect_value(t, tdata.write_timeout, 4 * time.Second)
 }
+
+@(test)
+test_stream_buffer_lifecycle_and_compaction :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+
+	stream: Stream_Buffer
+	stream_init(&stream, transport, initial_capacity = 64, compact_threshold = 32)
+
+	testing.expect_value(t, stream_unread_bytes(&stream), 0)
+
+	// Simulate populating buffer with 40 bytes
+	for i in 0 ..< 40 {
+		stream.buf[i] = u8(i)
+	}
+	stream.write_offset = 40
+	stream.read_offset = 35 // Consumed 35 bytes (>= compact_threshold of 32)
+
+	testing.expect_value(t, stream_unread_bytes(&stream), 5)
+
+	// Compact buffer
+	stream_compact(&stream)
+
+	testing.expect_value(t, stream.read_offset, 0)
+	testing.expect_value(t, stream.write_offset, 5)
+	testing.expect_value(t, stream_unread_bytes(&stream), 5)
+	for i in 0 ..< 5 {
+		testing.expect_value(t, stream.buf[i], u8(35 + i))
+	}
+
+	stream_close(&stream)
+	testing.expect(t, mock.is_closed, "stream_close should close underlying transport")
+
+	// Nil safety checks
+	stream_destroy(nil)
+	stream_close(nil)
+
+	// Compact when read_offset == 0 (no-op)
+	stream_compact(&stream)
+	testing.expect_value(t, stream.read_offset, 0)
+	testing.expect_value(t, stream.write_offset, 5)
+
+	// Compact when unread == 0
+	stream.read_offset = 5
+	stream_compact(&stream)
+	testing.expect_value(t, stream.read_offset, 0)
+	testing.expect_value(t, stream.write_offset, 0)
+
+	stream_destroy(&stream)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+

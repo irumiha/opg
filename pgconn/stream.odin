@@ -1,5 +1,6 @@
 package pgconn
 
+import "core:mem"
 import "core:net"
 import "core:time"
 import "../pgerr"
@@ -100,3 +101,59 @@ make_tcp_transport :: proc(data: ^TCP_Transport_Data, socket: net.TCP_Socket) ->
 		set_deadlines = tcp_set_deadlines,
 	}
 }
+
+// Stream_Buffer accumulates incoming bytes and manages outbound writes.
+Stream_Buffer :: struct {
+	transport:         Stream_Transport,
+	buf:               [dynamic]byte,
+	read_offset:       int,
+	write_offset:      int,
+	allocator:         mem.Allocator,
+	compact_threshold: int,
+}
+
+stream_init :: proc(
+	s: ^Stream_Buffer,
+	transport: Stream_Transport,
+	initial_capacity := 8192,
+	compact_threshold := 4096,
+	allocator := context.allocator,
+) {
+	s.transport = transport
+	s.allocator = allocator
+	s.buf = make([dynamic]byte, initial_capacity, allocator)
+	s.read_offset = 0
+	s.write_offset = 0
+	s.compact_threshold = compact_threshold
+}
+
+stream_destroy :: proc(s: ^Stream_Buffer) {
+	if s == nil do return
+	delete(s.buf)
+	s.buf = nil
+	s.read_offset = 0
+	s.write_offset = 0
+}
+
+stream_close :: proc(s: ^Stream_Buffer) {
+	if s == nil do return
+	if s.transport.close != nil {
+		s.transport.close(s.transport.data)
+	}
+}
+
+stream_unread_bytes :: proc(s: ^Stream_Buffer) -> int {
+	return s.write_offset - s.read_offset
+}
+
+stream_compact :: proc(s: ^Stream_Buffer) {
+	if s.read_offset == 0 do return
+
+	unread := s.write_offset - s.read_offset
+	if unread > 0 {
+		copy(s.buf[0:unread], s.buf[s.read_offset:s.write_offset])
+	}
+	s.read_offset = 0
+	s.write_offset = unread
+}
+

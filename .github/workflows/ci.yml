@@ -18,6 +18,7 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     name: offline (${{ matrix.os }})
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
 
@@ -53,15 +54,26 @@ jobs:
     name: integration (${{ matrix.os }})
     needs: offline
 
-    # One definition of where the test suite looks for PostgreSQL. The test
-    # harnesses read these PG* variables directly, so every step below targets
-    # the server provisioned by the setup action without repeating itself.
+    # The suite finishes in about a minute; anything approaching this is a
+    # hung connection, not slow work. Without a bound a hang runs to GitHub's
+    # 6-hour default, which is expensive on the macOS runner in particular.
+    timeout-minutes: 20
+
+    # Where the test suite looks for PostgreSQL, held under OPG_-prefixed names
+    # and mapped onto the PG* variables at each step below.
+    #
+    # The indirection is load-bearing. action-setup-postgres writes PG* names
+    # into $GITHUB_ENV, and $GITHUB_ENV outranks a job-level `env:` block while
+    # a step-level one outranks $GITHUB_ENV. Setting PGUSER/PGPASSWORD here
+    # directly means the action's (empty, on Windows) values win instead —
+    # which the suite survives only because every consumer happens to fall back
+    # to the same defaults.
     env:
-      PGHOST: '127.0.0.1'
-      PGPORT: '5432'
-      PGUSER: 'opg'
-      PGPASSWORD: 'opg'
-      PGDATABASE: 'opg_test'
+      OPG_PGHOST: '127.0.0.1'
+      OPG_PGPORT: '5432'
+      OPG_PGUSER: 'opg'
+      OPG_PGPASSWORD: 'opg'
+      OPG_PGDATABASE: 'opg_test'
 
     steps:
       - uses: actions/checkout@v7
@@ -86,19 +98,43 @@ jobs:
       # depend on the executable bit surviving checkout on every runner.
       - name: Configure Test Auth Scenarios
         shell: bash
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
         run: bash scripts/ci-setup-postgres.sh
 
       - name: Run Integration Tests
         shell: bash
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
         run: odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true
 
       # Sanitizers on Linux runner
       - name: Integration tests (AddressSanitizer)
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
         run: odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true -sanitize:address
 
       - name: Pool concurrency tests (ThreadSanitizer)
         if: runner.os == 'Linux'
         shell: bash
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
         run: odin test pgconn -define:OPG_INTEGRATION=true -sanitize:thread

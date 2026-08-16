@@ -94,8 +94,33 @@ ISC_REQ_SEQUENCE_DETECT        :: 0x00000008
 ISC_REQ_REPLAY_DETECT          :: 0x00000004
 ISC_REQ_CONFIDENTIALITY        :: 0x00000010
 ISC_REQ_ALLOCATE_MEMORY        :: 0x00000100
-ISC_REQ_STREAM                 :: 0x00000400
+// ISC_REQ_DATAGRAM selects DTLS and ISC_REQ_STREAM selects TLS. Both are
+// listed, in their sspi.h order, because ISC_REQ_STREAM was once transcribed
+// as 0x00000400 — the value belonging to ISC_REQ_DATAGRAM two entries above
+// it. Schannel honoured the request and emitted a DTLS ClientHello (version
+// 0xFEFD) over TCP, which PostgreSQL closed the connection on; no SSPI call
+// reported an error anywhere along the way.
+ISC_REQ_DATAGRAM               :: 0x00000400
+ISC_REQ_CONNECTION             :: 0x00000800
+ISC_REQ_STREAM                 :: 0x00008000
 ISC_REQ_MANUAL_CRED_VALIDATION :: 0x00080000
+
+/*
+	SCHANNEL_REQ_FLAGS is the context request passed to
+	InitializeSecurityContext for every connection.
+
+	Named rather than assembled inline because this flag set decides which
+	protocol Schannel speaks, and a wrong bit here does not fail at the API
+	level: every SSPI call still returns success. One auditable value gives the
+	tests something to assert against.
+*/
+SCHANNEL_REQ_FLAGS: c.ulong :
+	ISC_REQ_SEQUENCE_DETECT |
+	ISC_REQ_REPLAY_DETECT |
+	ISC_REQ_CONFIDENTIALITY |
+	ISC_REQ_ALLOCATE_MEMORY |
+	ISC_REQ_STREAM |
+	ISC_REQ_MANUAL_CRED_VALIDATION
 
 Schannel_API :: struct {
 	__handle:                   dynlib.Library,
@@ -179,7 +204,7 @@ make_schannel_transport :: proc(
 		target_c = strings.clone_to_cstring(server_name, context.temp_allocator)
 	}
 
-	req_flags: c.ulong = ISC_REQ_SEQUENCE_DETECT | ISC_REQ_REPLAY_DETECT | ISC_REQ_CONFIDENTIALITY | ISC_REQ_ALLOCATE_MEMORY | ISC_REQ_STREAM | ISC_REQ_MANUAL_CRED_VALIDATION
+	req_flags := SCHANNEL_REQ_FLAGS
 	out_buf: SecBuffer = {cbBuffer = 0, BufferType = SECBUFFER_TOKEN, pvBuffer = nil}
 	out_desc: SecBufferDesc = {ulVersion = SECBUFFER_VERSION, cBuffers = 1, pBuffers = &out_buf}
 	attrs: c.ulong = 0

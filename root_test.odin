@@ -37,6 +37,18 @@ test_root_facade_nil_connection_safety :: proc(t: ^testing.T) {
 }
 
 @(test)
+test_pool_release_reports_foreign_connection :: proc(t: ^testing.T) {
+	// Releasing a connection the pool never handed out, or releasing one
+	// twice, is a caller bug that corrupts pool accounting. The pool layer
+	// detects it, so the facade must not swallow the verdict.
+	err := pool_release(nil, nil)
+
+	perr, is_pool := err.(Pool_Error)
+	testing.expect(t, is_pool, "pool_release must report a foreign connection rather than ignoring it")
+	testing.expect_value(t, perr.type, Pool_Error_Type.Foreign_Connection)
+}
+
+@(test)
 test_is_alive_reflects_connection_state :: proc(t: ^testing.T) {
 	testing.expect(t, !is_alive(nil), "a nil connection is not alive")
 

@@ -31,6 +31,7 @@ import "core:time"
 import "pgconn"
 import "pgerr"
 import "pgmap"
+import "pgproto"
 
 // ============================================================================
 // 1. Re-exported Errors & Tagged Unions
@@ -105,6 +106,37 @@ Pool                   :: pgconn.Pool
 	Pool_Config defines connection pooling limits, timeouts, and factory configurations.
 */
 Pool_Config            :: pgconn.Pool_Config
+
+/*
+	Data_Row is one row delivered to a Row_Callback during streaming.
+	`values` holds one Column_Value per column, in the order described by
+	Row_Description. The byte slices borrow the stream buffer and are only
+	valid for the duration of the callback: copy anything you need to keep.
+*/
+Data_Row               :: pgproto.Msg_Data_Row
+
+/*
+	Column_Value is a single column within a Data_Row. When `is_null` is set,
+	`data` carries no meaning.
+*/
+Column_Value           :: pgproto.Column_Value
+
+/*
+	Row_Description is the column metadata delivered to a Row_Desc_Callback
+	before the first row. Field names borrow the stream buffer, as in Data_Row.
+*/
+Row_Description        :: pgproto.Msg_Row_Description
+
+/*
+	Field_Description describes one column: its name, type OID, size and
+	format code.
+*/
+Field_Description      :: pgproto.Field_Description
+
+/*
+	Field_Format distinguishes text from binary column encoding.
+*/
+Field_Format           :: pgproto.Field_Format
 
 /*
 	Row_Callback is invoked per row during streaming query execution.
@@ -271,9 +303,14 @@ pool_acquire :: proc(pool: ^Pool, timeout := time.Duration(0)) -> (^Conn, Error)
 
 /*
 	pool_release returns a leased connection back to the connection pool for reuse.
+
+	Returns:
+	  - Pool_Error{.Foreign_Connection} if the connection was not leased from
+	    this pool, which also covers releasing the same connection twice.
+	  - Error from the reset performed on a connection left mid-transaction.
 */
-pool_release :: proc(pool: ^Pool, conn: ^Conn) {
-	pgconn.pool_release(pool, conn)
+pool_release :: proc(pool: ^Pool, conn: ^Conn) -> Error {
+	return pgconn.pool_release(pool, conn)
 }
 
 // ============================================================================

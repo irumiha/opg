@@ -54,9 +54,9 @@ when OPG_INTEGRATION {
 				val: i32 `db:"val"`,
 			}
 			row, qerr := opg.query_struct(conn, Number_Row, "SELECT $1::int AS val;", i32(task.worker_id * 1000 + i))
-			opg.pool_release(task.pool, conn)
+			rel_err := opg.pool_release(task.pool, conn)
 
-			if qerr != nil || row.val != i32(task.worker_id * 1000 + i) {
+			if qerr != nil || rel_err != nil || row.val != i32(task.worker_id * 1000 + i) {
 				task.err_occurred = true
 				return
 			}
@@ -115,7 +115,7 @@ when OPG_INTEGRATION {
 		peak_bytes:  int,
 	}
 
-	large_stream_on_row :: proc(user_data: rawptr, row: pgproto.Msg_Data_Row) -> bool {
+	large_stream_on_row :: proc(user_data: rawptr, row: opg.Data_Row) -> bool {
 		c := (^Large_Stream_Collector)(user_data)
 		c.row_count += 1
 		if len(row.values) > 0 && !row.values[0].is_null {
@@ -125,7 +125,7 @@ when OPG_INTEGRATION {
 		return true
 	}
 
-	large_stream_on_desc :: proc(user_data: rawptr, desc: pgproto.Msg_Row_Description) {
+	large_stream_on_desc :: proc(user_data: rawptr, desc: opg.Row_Description) {
 		c := (^Large_Stream_Collector)(user_data)
 		if len(desc.fields) > 0 {
 			c.column_name = strings.clone(desc.fields[0].name, context.allocator)

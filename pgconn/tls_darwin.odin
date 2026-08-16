@@ -1,5 +1,6 @@
 package pgconn
 
+import "base:runtime"
 import "core:c"
 import "core:dynlib"
 import "core:net"
@@ -64,6 +65,7 @@ secure_transport_probe :: proc() -> bool {
 }
 
 secure_transport_read_cb :: proc "c" (connection: rawptr, data: rawptr, dataLength: ^c.size_t) -> c.int {
+	context = runtime.default_context()
 	sock := net.TCP_Socket(uintptr(connection))
 	wanted := int(dataLength^)
 	if wanted == 0 {
@@ -96,6 +98,7 @@ secure_transport_read_cb :: proc "c" (connection: rawptr, data: rawptr, dataLeng
 }
 
 secure_transport_write_cb :: proc "c" (connection: rawptr, data: rawptr, dataLength: ^c.size_t) -> c.int {
+	context = runtime.default_context()
 	sock := net.TCP_Socket(uintptr(connection))
 	to_send := int(dataLength^)
 	if to_send == 0 {

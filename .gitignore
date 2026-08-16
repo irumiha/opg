@@ -8,3 +8,4 @@ build/
 # the package, so they have no extension to match on).
 /opg
 /tests
+/tls-stress

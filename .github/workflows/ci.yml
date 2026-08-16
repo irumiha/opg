@@ -1,8 +1,3 @@
-# opg CI – offline gate on all three platforms; Linux integration + sanitizers.
-#
-# Odin compiler: installed via laytan/setup-odin@v2 (nightly channel).
-# macOS/Windows integration testing deferred to OPG-502 (native TLS backends).
-
 name: CI
 
 on:
@@ -13,8 +8,7 @@ on:
 
 jobs:
   # --------------------------------------------------------------------------
-  # Offline gate: compile + unit tests (no database required).
-  # Runs on all three platforms.
+  # Offline gate: compile check + offline unit tests on all 3 OS platforms.
   # --------------------------------------------------------------------------
   offline:
     strategy:
@@ -45,12 +39,18 @@ jobs:
         run: odin test tests -all-packages -vet -strict-style
 
   # --------------------------------------------------------------------------
-  # Linux-only: full integration test suite against dockerized PostgreSQL,
-  # plus AddressSanitizer and ThreadSanitizer passes.
+  # Multi-OS Integration: native PostgreSQL on Linux, macOS, and Windows.
+  # Exercises live database queries, authentication scenarios, and platform
+  # TLS backends (OpenSSL on Linux, SecureTransport on macOS, Schannel on Windows).
   # --------------------------------------------------------------------------
   integration:
-    runs-on: ubuntu-latest
-    name: integration (ubuntu-latest)
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+    name: integration (${{ matrix.os }})
     needs: offline
     steps:
       - uses: actions/checkout@v7
@@ -60,18 +60,56 @@ jobs:
         with:
           release: nightly
 
-      - name: Start PostgreSQL (docker compose)
-        run: docker compose up -d --wait postgres
+      - name: Setup Native PostgreSQL
+        uses: ikalnytskyi/action-setup-postgres@v8
+        id: postgres
+        with:
+          postgres-version: '17'
+          username: opg
+          password: opg
+          database: opg_test
+          port: 5432
+          ssl: true
 
-      - name: Integration tests
-        run: scripts/integration-test.sh
+      - name: Configure Test Auth Scenarios
+        shell: bash
+        env:
+          PGHOST: '127.0.0.1'
+          PGPORT: '5432'
+          PGUSER: 'opg'
+          PGPASSWORD: 'opg'
+          PGDATABASE: 'opg_test'
+        run: ./scripts/ci-setup-postgres.sh
 
+      - name: Run Integration Tests
+        shell: bash
+        env:
+          PGHOST: '127.0.0.1'
+          PGPORT: '5432'
+          PGUSER: 'opg'
+          PGPASSWORD: 'opg'
+          PGDATABASE: 'opg_test'
+        run: odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true
+
+      # Sanitizers on Linux runner
       - name: Integration tests (AddressSanitizer)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PGHOST: '127.0.0.1'
+          PGPORT: '5432'
+          PGUSER: 'opg'
+          PGPASSWORD: 'opg'
+          PGDATABASE: 'opg_test'
         run: odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true -sanitize:address
 
       - name: Pool concurrency tests (ThreadSanitizer)
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          PGHOST: '127.0.0.1'
+          PGPORT: '5432'
+          PGUSER: 'opg'
+          PGPASSWORD: 'opg'
+          PGDATABASE: 'opg_test'
         run: odin test pgconn -define:OPG_INTEGRATION=true -sanitize:thread
-
-      - name: Tear down PostgreSQL
-        if: always()
-        run: docker compose down

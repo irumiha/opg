@@ -85,6 +85,24 @@ TLS_Transport_Data :: struct {
 	remainder as a trailing byte count. Keeping it is what lets the following
 	read resume on a record boundary rather than mid-record.
 */
+/*
+	tls_deadline_exceeded reports whether a retry loop has outlived the
+	timeout configured for it.
+
+	Every backend retries on "would block", which is also exactly what a socket
+	whose receive or send timeout expired reports. Counting retries alone
+	therefore multiplies the deadline: with a one second socket timeout, 5000
+	retries of a second each is well over an hour. Elapsed wall time is what
+	bounds a configured deadline; the retry counter remains as the backstop for
+	a socket with no deadline set.
+
+	A non-positive timeout means no deadline, matching Conn_Config's zero value.
+*/
+tls_deadline_exceeded :: proc(start: time.Time, timeout: time.Duration) -> bool {
+	if timeout <= 0 do return false
+	return time.since(start) >= timeout
+}
+
 tls_retain_tail :: proc(buf: ^[dynamic]byte, keep: int) {
 	if buf == nil do return
 	if keep <= 0 {

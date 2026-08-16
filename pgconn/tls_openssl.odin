@@ -132,6 +132,7 @@ openssl_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: p
 		return 0, nil
 	}
 	want_retries := 0
+	start := time.now()
 	for {
 		ret := openssl.SSL_read(data.openssl_ssl, raw_data(buf), c.int(len(buf)))
 		if ret > 0 {
@@ -140,6 +141,12 @@ openssl_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: p
 		code := openssl.SSL_get_error(data.openssl_ssl, ret)
 		switch code {
 		case SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
+			// A socket read deadline expires as EAGAIN, which OpenSSL reports
+			// as WANT_READ; without the elapsed check the retry budget would
+			// stretch the configured timeout by three orders of magnitude.
+			if tls_deadline_exceeded(start, data.read_timeout) {
+				return 0, pgerr.Net_Error{type = .Timeout}
+			}
 			want_retries += 1
 			if want_retries > TLS_MAX_WANT_RETRIES {
 				return 0, pgerr.Net_Error{type = .Timeout}
@@ -165,16 +172,22 @@ openssl_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written: 
 	data := (^TLS_Transport_Data)(transport)
 	total := 0
 	want_retries := 0
+	start := time.now()
 	for total < len(data_bytes) {
 		remaining := data_bytes[total:]
 		ret := openssl.SSL_write(data.openssl_ssl, raw_data(remaining), c.int(len(remaining)))
 		if ret > 0 {
 			total += int(ret)
 			want_retries = 0 // successful write resets the counter
+			start = time.now()
 			continue
 		}
 		code := openssl.SSL_get_error(data.openssl_ssl, ret)
 		if code == SSL_ERROR_WANT_READ || code == SSL_ERROR_WANT_WRITE {
+			// See openssl_read: a send deadline surfaces here as "would block".
+			if tls_deadline_exceeded(start, data.write_timeout) {
+				return total, pgerr.Net_Error{type = .Timeout}
+			}
 			want_retries += 1
 			if want_retries > TLS_MAX_WANT_RETRIES {
 				return total, pgerr.Net_Error{type = .Timeout}

@@ -54,3 +54,55 @@ test_tcp_transport_applies_read_deadline :: proc(t: ^testing.T) {
 		elapsed,
 	)
 }
+
+@(test)
+test_tcp_transport_clears_read_deadline :: proc(t: ^testing.T) {
+	// A deadline must be removable, not just settable: pool connections are
+	// reused, and a short timeout left behind on the socket would fire on the
+	// next borrower. Skipping the setsockopt for a zero duration would leave
+	// the previous deadline installed while the transport reported none.
+	listener, lerr := net.listen_tcp(net.Endpoint{address = net.IP4_Loopback, port = 0})
+	if lerr != nil {
+		testing.fail_now(t, "could not open a loopback listener")
+	}
+	defer net.close(listener)
+
+	endpoint, eerr := net.bound_endpoint(listener)
+	if eerr != nil {
+		testing.fail_now(t, "could not read the listener endpoint")
+	}
+
+	client, cerr := net.dial_tcp(endpoint)
+	if cerr != nil {
+		testing.fail_now(t, "could not dial the loopback listener")
+	}
+
+	server, _, aerr := net.accept_tcp(listener)
+	if aerr != nil {
+		testing.fail_now(t, "could not accept the loopback connection")
+	}
+	defer net.close(server)
+
+	data: TCP_Transport_Data
+	transport := make_tcp_transport(&data, client)
+	defer transport.close(transport.data)
+
+	// Set a deadline, confirm it bites, then clear it.
+	testing.expect_value(t, transport.set_deadlines(transport.data, 50 * time.Millisecond, 0), nil)
+	buf: [16]byte
+	_, timed_out := transport.read(transport.data, buf[:])
+	nerr, is_net := timed_out.(pgerr.Net_Error)
+	testing.expect(t, is_net && nerr.type == .Timeout, "expected the deadline to fire before it was cleared")
+
+	testing.expect_value(t, transport.set_deadlines(transport.data, 0, 0), nil)
+
+	// With no deadline the read must wait for data rather than expiring.
+	payload := []byte{'o', 'p', 'g'}
+	_, serr := net.send_tcp(server, payload)
+	testing.expect_value(t, serr, nil)
+
+	n, rerr := transport.read(transport.data, buf[:])
+	testing.expect_value(t, rerr, nil)
+	testing.expect_value(t, n, 3)
+	testing.expect_value(t, string(buf[:n]), "opg")
+}

@@ -111,17 +111,29 @@ apply_socket_deadlines :: proc(
 	socket: net.TCP_Socket,
 	read_timeout, write_timeout: time.Duration,
 ) -> pgerr.Error {
-	if read_timeout > 0 {
-		if oerr := net.set_option(socket, .Receive_Timeout, read_timeout); oerr != nil {
-			return pgerr.Net_Error{type = .Recv_Failed}
-		}
+	if oerr := net.set_option(socket, .Receive_Timeout, socket_deadline(read_timeout)); oerr != nil {
+		return pgerr.Net_Error{type = .Recv_Failed}
 	}
-	if write_timeout > 0 {
-		if oerr := net.set_option(socket, .Send_Timeout, write_timeout); oerr != nil {
-			return pgerr.Net_Error{type = .Send_Failed}
-		}
+	if oerr := net.set_option(socket, .Send_Timeout, socket_deadline(write_timeout)); oerr != nil {
+		return pgerr.Net_Error{type = .Send_Failed}
 	}
 	return nil
+}
+
+/*
+	socket_deadline normalizes a configured duration into one the socket layer
+	can represent.
+
+	Zero is passed through deliberately: both POSIX and Winsock read a zero
+	timeout as "block indefinitely", which is how a deadline gets cleared. A
+	positive duration is raised to at least a millisecond because the Windows
+	backend converts with integer milliseconds — anything shorter would
+	truncate to zero and mean the exact opposite of what the caller asked for.
+*/
+@(private = "file")
+socket_deadline :: proc(timeout: time.Duration) -> time.Duration {
+	if timeout <= 0 do return time.Duration(0)
+	return max(timeout, time.Millisecond)
 }
 
 tcp_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: time.Duration) -> pgerr.Error {

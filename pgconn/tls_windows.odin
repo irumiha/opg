@@ -94,7 +94,15 @@ ISC_REQ_SEQUENCE_DETECT        :: 0x00000008
 ISC_REQ_REPLAY_DETECT          :: 0x00000004
 ISC_REQ_CONFIDENTIALITY        :: 0x00000010
 ISC_REQ_ALLOCATE_MEMORY        :: 0x00000100
-ISC_REQ_STREAM                 :: 0x00000400
+// ISC_REQ_DATAGRAM selects DTLS and ISC_REQ_STREAM selects TLS. Both are
+// listed, in their sspi.h order, because ISC_REQ_STREAM was once transcribed
+// as 0x00000400 — the value belonging to ISC_REQ_DATAGRAM two entries above
+// it. Schannel honoured the request and emitted a DTLS ClientHello (version
+// 0xFEFD) over TCP, which PostgreSQL closed the connection on; no SSPI call
+// reported an error anywhere along the way.
+ISC_REQ_DATAGRAM               :: 0x00000400
+ISC_REQ_CONNECTION             :: 0x00000800
+ISC_REQ_STREAM                 :: 0x00008000
 ISC_REQ_MANUAL_CRED_VALIDATION :: 0x00080000
 
 /*

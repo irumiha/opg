@@ -180,6 +180,7 @@ conn_handshake :: proc(
 
 	// 1. Build and send StartupMessage
 	startup_params := make([dynamic]pgproto.Startup_Param, context.temp_allocator)
+	defer delete(startup_params)
 	append(&startup_params, pgproto.Startup_Param{name = "user", value = config.user})
 	if len(config.database) > 0 {
 		append(&startup_params, pgproto.Startup_Param{name = "database", value = config.database})
@@ -202,8 +203,22 @@ conn_handshake :: proc(
 	defer scram_state_destroy(&scram_state)
 
 	// 3. Read backend messages until ReadyForQuery
+	//
+	// Parsing goes to the connection's scratch, as it does in every other read
+	// loop. The handshake reads a bounded number of messages, so this is not
+	// about growth — it is so "message parsing scratch is the driver's own"
+	// holds without an exception a caller has to know about.
+	//
+	// auth_handle_challenge keeps context.temp_allocator: it allocates and
+	// frees its own buffers, and an arena cannot service the frees
+	// (Mode_Not_Implemented). Nothing it builds outlives the call, and every
+	// Scram_State field that spans iterations is cloned into the persistent
+	// allocator, so the reset below cannot reach anything still in use.
+	scratch := conn_scratch_allocator(c)
+
 	for {
-		msg := stream_read_message(&c.stream, context.temp_allocator) or_return
+		conn_scratch_reset(c)
+		msg := stream_read_message(&c.stream, scratch) or_return
 
 		#partial switch m in msg {
 		case pgproto.Msg_Authentication:

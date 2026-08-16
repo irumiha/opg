@@ -1045,3 +1045,68 @@ test_conn_connect_default_port_invalid_host :: proc(t: ^testing.T) {
 
 
 
+
+/*
+	The handshake reads a bounded number of messages, so unlike row streaming it
+	was never at risk of unbounded growth. It is here for a different reason:
+	"message parsing scratch is the driver's own" is either true of every read
+	loop or it is not a property a caller can rely on, and a pool that re-dials
+	during request handling would otherwise leave handshake parse garbage in
+	whatever arena that request installed.
+*/
+@(test)
+test_conn_handshake_does_not_leave_parsing_in_the_callers_temp_arena :: proc(t: ^testing.T) {
+	temp_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&temp_track, context.allocator)
+	defer mem.tracking_allocator_destroy(&temp_track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	// Cleartext auth: challenge, ok, ready.
+	auth_cleartext := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 3}
+	auth_ok := []byte{'R', 0, 0, 0, 8, 0, 0, 0, 0}
+	// A ParameterStatus and BackendKeyData so the loop runs its other arms too.
+	// length = 4 + len("server\0") + len("17.0\0") = 4 + 7 + 5 = 16
+	param_status := []byte{'S', 0, 0, 0, 16, 's', 'e', 'r', 'v', 'e', 'r', 0, '1', '7', '.', '0', 0}
+	key_data := []byte{'K', 0, 0, 0, 12, 0, 0, 4, 210, 0, 0, 22, 46}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, auth_cleartext)
+	append(&mock.read_chunks, auth_ok)
+	append(&mock.read_chunks, param_status)
+	append(&mock.read_chunks, key_data)
+	append(&mock.read_chunks, rfq)
+
+	transport := make_mock_transport(&mock)
+	config := Conn_Config {
+		host     = "localhost",
+		port     = 5432,
+		user     = "postgres",
+		password = "secretpassword",
+		database = "testdb",
+	}
+
+	saved_temp := context.temp_allocator
+	context.temp_allocator = mem.tracking_allocator(&temp_track)
+	conn, err := conn_connect_with_transport(config, transport, context.allocator)
+	live := len(temp_track.allocation_map)
+	context.temp_allocator = saved_temp
+
+	testing.expectf(t, err == nil, "expected handshake success, got %v", err)
+	if conn != nil {
+		testing.expect_value(t, conn.status, Conn_Status.Ready)
+		testing.expect_value(t, conn.backend_pid, i32(1234))
+		conn_close(conn)
+		free(conn, context.allocator)
+	}
+
+	testing.expectf(
+		t,
+		live == 0,
+		"the handshake left %d live allocations in the caller's temp arena",
+		live,
+	)
+
+	mock_transport_destroy(&mock)
+}

@@ -288,6 +288,7 @@ make_schannel_transport :: proc(
 		// these are application data; mid-handshake they are the next token,
 		// already in hand, so another read would block waiting for bytes the
 		// server has finished sending.
+		supplied := len(data.schannel_enc)
 		extra := 0
 		if in_bufs[1].BufferType == SECBUFFER_EXTRA {
 			extra = int(in_bufs[1].cbBuffer)
@@ -296,16 +297,17 @@ make_schannel_transport :: proc(
 
 		if status == SEC_E_OK do break
 
-		need_more_data = extra == 0
+		// Re-running over a buffer nothing was consumed from would spin without
+		// touching the socket, so treat "no progress" as needing more input.
+		need_more_data = extra == 0 || extra >= supplied
 	}
 
 	// Query stream sizes for framing
 	sizes: SecPkgContext_StreamSizes
 	sz_ret := schannel.QueryContextAttributesA(&ctxt, SECPKG_ATTR_STREAM_SIZES, &sizes)
 	if sz_ret != SEC_E_OK {
-		schannel.DeleteSecurityContext(&ctxt)
-		schannel.FreeCredentialsHandle(&cred)
-		return {}, pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(sz_ret)}
+		return {}, handshake_failed(data, &ctxt, &cred,
+			pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(sz_ret)})
 	}
 
 	// Bound to the connection allocator here rather than on first append, so
@@ -354,7 +356,8 @@ schannel_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: 
 		// buffer routinely carries a whole record left over from an earlier
 		// read, and reading first would block on a server with nothing more
 		// to send until we consume what it already sent.
-		if len(data.schannel_enc) > 0 {
+		supplied := len(data.schannel_enc)
+		if supplied > 0 {
 			bufs: [4]SecBuffer
 			bufs[0] = SecBuffer{cbBuffer = c.ulong(len(data.schannel_enc)), BufferType = SECBUFFER_DATA, pvBuffer = raw_data(data.schannel_enc[:])}
 			bufs[1] = SecBuffer{BufferType = SECBUFFER_EMPTY}
@@ -392,7 +395,9 @@ schannel_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: 
 				// instance) decrypts to nothing; keep going rather than
 				// reporting a zero-length read as end of stream.
 				if copied > 0 do return copied, nil
-				continue
+				// Unless nothing was consumed either — re-decrypting the same
+				// bytes would spin, so read more instead.
+				if extra < supplied do continue
 
 			case SEC_I_CONTEXT_EXPIRED:
 				// Peer sent close_notify. An orderly end of stream, not a fault.
@@ -492,5 +497,5 @@ schannel_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: t
 	data := (^TLS_Transport_Data)(transport)
 	data.read_timeout = read_timeout
 	data.write_timeout = write_timeout
-	return nil
+	return apply_socket_deadlines(data.socket, read_timeout, write_timeout)
 }

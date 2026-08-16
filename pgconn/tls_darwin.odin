@@ -311,5 +311,5 @@ sec_trans_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: 
 	data := (^TLS_Transport_Data)(transport)
 	data.read_timeout = read_timeout
 	data.write_timeout = write_timeout
-	return nil
+	return apply_socket_deadlines(data.socket, read_timeout, write_timeout)
 }

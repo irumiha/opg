@@ -94,12 +94,41 @@ tcp_close :: proc(transport: rawptr) {
 	net.close(data.socket)
 }
 
+/*
+	apply_socket_deadlines pushes the configured timeouts down to the socket
+	itself, which is what makes Conn_Config's read_timeout and write_timeout
+	take effect: recording them on the transport alone leaves a blocking read
+	blocking forever.
+
+	A non-positive duration means "no deadline" and is left alone, matching the
+	zero value of Conn_Config.
+
+	Shared by every transport, TLS included: the TLS backends read and write
+	through this same socket, so the deadline belongs on it rather than in each
+	backend's retry loop.
+*/
+apply_socket_deadlines :: proc(
+	socket: net.TCP_Socket,
+	read_timeout, write_timeout: time.Duration,
+) -> pgerr.Error {
+	if read_timeout > 0 {
+		if oerr := net.set_option(socket, .Receive_Timeout, read_timeout); oerr != nil {
+			return pgerr.Net_Error{type = .Recv_Failed}
+		}
+	}
+	if write_timeout > 0 {
+		if oerr := net.set_option(socket, .Send_Timeout, write_timeout); oerr != nil {
+			return pgerr.Net_Error{type = .Send_Failed}
+		}
+	}
+	return nil
+}
+
 tcp_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: time.Duration) -> pgerr.Error {
 	data := (^TCP_Transport_Data)(transport)
 	data.read_timeout = read_timeout
 	data.write_timeout = write_timeout
-	// Note: core:net socket timeout configuration can be hooked here
-	return nil
+	return apply_socket_deadlines(data.socket, read_timeout, write_timeout)
 }
 
 make_tcp_transport :: proc(data: ^TCP_Transport_Data, socket: net.TCP_Socket) -> Stream_Transport {

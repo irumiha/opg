@@ -313,9 +313,14 @@ test_make_tcp_transport :: proc(t: ^testing.T) {
 	testing.expect(t, transport.close != nil, "expected transport.close to be populated")
 	testing.expect(t, transport.set_deadlines != nil, "expected transport.set_deadlines to be populated")
 
-	// Verify set_deadlines mutates TCP_Transport_Data
+	// set_deadlines records the durations and then applies them to the socket.
+	// This one is a stand-in descriptor, not an open socket, so applying them
+	// fails — and reporting that failure is the point: a caller that asked for
+	// a deadline must not be told it was set when it was not. Deadlines
+	// actually taking effect is covered in deadline_test.odin against a real
+	// loopback socket.
 	derr := transport.set_deadlines(transport.data, 2 * time.Second, 4 * time.Second)
-	testing.expect(t, derr == nil)
+	testing.expect(t, derr != nil, "expected an error when deadlines cannot be applied to the socket")
 	testing.expect_value(t, tdata.read_timeout, 2 * time.Second)
 	testing.expect_value(t, tdata.write_timeout, 4 * time.Second)
 }

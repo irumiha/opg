@@ -32,6 +32,14 @@ jobs:
         with:
           release: nightly
 
+      # Offline first: the Schannel flag assertions need no database, and a
+      # red result here localises the fault before any server is involved.
+      - name: Offline pgconn tests
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 5
+        run: odin test pgconn -vet -strict-style
+
       - name: Setup Native PostgreSQL
         uses: ikalnytskyi/action-setup-postgres@v8
         id: postgres

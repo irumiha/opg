@@ -294,3 +294,44 @@ test_tls_retain_tail_clamps_oversized_request :: proc(t: ^testing.T) {
 	testing.expect_value(t, len(buf), 2)
 	testing.expect_value(t, buf[0], byte(1))
 }
+
+// ----------------------------------------------------------------------------
+// Schannel context request flags
+// ----------------------------------------------------------------------------
+
+@(test)
+test_schannel_requests_a_stream_context :: proc(t: ^testing.T) {
+	// PostgreSQL speaks TLS over TCP. Schannel chooses between TLS and DTLS
+	// from the context request flags, and the deciding bit has close
+	// neighbours in sspi.h:
+	//
+	//     ISC_REQ_DATAGRAM    0x00000400   -> DTLS
+	//     ISC_REQ_CONNECTION  0x00000800
+	//     ISC_REQ_STREAM      0x00008000   -> TLS
+	//
+	// Asking for the wrong one fails silently at the API level: every SSPI
+	// call returns success, a token comes back, and the mistake is visible
+	// only on the wire, as a DTLS ClientHello (version 0xFEFD, 13-byte record
+	// header carrying an epoch and sequence number) that a TCP server closes
+	// the connection on. That is exactly what shipped, and it is why the
+	// Windows backend never completed a handshake.
+	//
+	// The reference values below are transcribed from sspi.h so these
+	// assertions check the driver against the ABI rather than against itself.
+	when ODIN_OS == .Windows {
+		SSPI_ISC_REQ_DATAGRAM :: 0x00000400
+		SSPI_ISC_REQ_STREAM :: 0x00008000
+
+		testing.expect_value(t, u32(ISC_REQ_STREAM), u32(SSPI_ISC_REQ_STREAM))
+		testing.expect(
+			t,
+			SCHANNEL_REQ_FLAGS & SSPI_ISC_REQ_DATAGRAM == 0,
+			"the Schannel context request must not ask for DTLS",
+		)
+		testing.expect(
+			t,
+			SCHANNEL_REQ_FLAGS & SSPI_ISC_REQ_STREAM != 0,
+			"the Schannel context request must ask for a stream (TLS) context",
+		)
+	}
+}

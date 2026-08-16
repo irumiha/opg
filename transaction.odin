@@ -88,6 +88,10 @@ Tx :: struct {
 
 	Returns:
 	  - An active Tx handle, or an Error on failure.
+	  - Protocol_Error{.Unexpected_Message} if the connection is already inside a
+	    transaction. PostgreSQL has no nested transactions, so a second handle
+	    would silently share the first one's transaction; use tx_savepoint to
+	    nest within an existing transaction instead.
 
 	Example:
 	  tx, err := opg.begin_transaction(conn, {

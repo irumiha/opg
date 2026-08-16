@@ -73,6 +73,22 @@ pool_destroy_conn :: proc(pool: ^Pool, conn: ^Conn) {
 	pool_init validates the configuration, pre-warms min_conns connections,
 	and returns a ready pool. On any pre-warm dial failure the partially
 	constructed pool is torn down and the dial error is returned.
+
+	THE ALLOCATOR MUST BE THREAD-SAFE.
+
+	`allocator` becomes the pool's own and is used for every connection it
+	creates or destroys for the rest of its life. Dials deliberately happen
+	outside the pool mutex — a slow or hanging connect must not block every
+	other borrower — so two threads can be allocating connection state through
+	it at the same moment. The default `context.allocator` is fine. An arena, a
+	tracking allocator, or anything else that assumes a single thread will
+	corrupt under load, and it will do so at a completely unrelated call site.
+
+	This is separate from the per-request arena a server might install as
+	`context.allocator`: the pool captures whatever it is given here once, at
+	creation, so a request-scoped allocator would be dangling for every
+	connection dialled after that request ended. Give the pool an allocator
+	that outlives it.
 */
 pool_init :: proc(
 	config: Pool_Config,

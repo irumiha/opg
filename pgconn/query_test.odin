@@ -2000,3 +2000,108 @@ test_conn_query_error_belongs_to_the_connection_allocator :: proc(t: ^testing.T)
 
 	testing.expect_value(t, len(track.allocation_map), 0)
 }
+
+/*
+	Row streaming exists so a large result set does not have to fit in memory.
+	Parsing every message into the caller's temp arena defeats that: the driver
+	frees none of it, and the caller cannot safely reset the arena mid-stream
+	because the row bytes borrow the stream buffer. Live memory then scales
+	with the row count, which is the one thing streaming is supposed to avoid.
+
+	The assertion watches the *caller's* temp arena rather than driver-internal
+	memory. The driver is free to keep scratch of its own and recycle it; what
+	it must not do is leave a growing pile behind in an arena it does not own.
+*/
+@(test)
+test_conn_query_streaming_does_not_grow_the_callers_temp_arena :: proc(t: ^testing.T) {
+	// Enough rows that a scratch arena which never recycles would be forced to
+	// take many blocks from its backing allocator, so the byte bound below can
+	// tell recycling from mere relocation.
+	ROWS :: 20_000
+
+	temp_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&temp_track, context.allocator)
+	defer mem.tracking_allocator_destroy(&temp_track)
+
+	// Both arenas are watched. Watching only the caller's would pass just as
+	// well if the driver had merely relocated the growth into its own scratch,
+	// which is not a fix.
+	conn_track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&conn_track, context.allocator)
+	defer mem.tracking_allocator_destroy(&conn_track)
+	context.allocator = mem.tracking_allocator(&conn_track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	row_desc := []byte {
+		'T', 0, 0, 0, 28,
+		0, 1,
+		'v', 'a', 'l', 0,
+		0, 0, 0, 0,
+		0, 0,
+		0, 0, 0, 23,
+		0, 4,
+		255, 255, 255, 255,
+		0, 0,
+	}
+	// One packet appended many times: every row is identical, so the backing
+	// storage can be shared and the test stays about allocation, not fixtures.
+	data_row := []byte{'D', 0, 0, 0, 11, 0, 1, 0, 0, 0, 1, '7'}
+	cmd_done := []byte{'C', 0, 0, 0, 13, 'S', 'E', 'L', 'E', 'C', 'T', ' ', '1', 0}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'I'}
+
+	append(&mock.read_chunks, row_desc)
+	for _ in 0 ..< ROWS {
+		append(&mock.read_chunks, data_row)
+	}
+	append(&mock.read_chunks, cmd_done)
+	append(&mock.read_chunks, rfq)
+
+	seen := 0
+	count_row :: proc(user_data: rawptr, row: pgproto.Msg_Data_Row) -> bool {
+		n := (^int)(user_data)
+		n^ += 1
+		return true
+	}
+
+	// Bytes, not allocation count: an arena takes few, large blocks, so a
+	// count would look flat whether or not the blocks are being reused.
+	before_bytes := conn_track.current_memory_allocated
+
+	saved_temp := context.temp_allocator
+	context.temp_allocator = mem.tracking_allocator(&temp_track)
+	err := conn_query(conn, "SELECT val FROM big;", count_row, nil, nil, &seen)
+	live := len(temp_track.allocation_map)
+	context.temp_allocator = saved_temp
+
+	grew_bytes := conn_track.current_memory_allocated - before_bytes
+
+	testing.expect_value(t, err, nil)
+	testing.expect_value(t, seen, ROWS)
+	testing.expectf(
+		t,
+		live < 32,
+		"the caller's temp arena holds %d live allocations after %d rows; per-message parsing must not accumulate there",
+		live,
+		ROWS,
+	)
+	testing.expectf(
+		t,
+		grew_bytes < 256 * 1024,
+		"the driver's own memory grew by %d bytes over %d rows; the parsing scratch must be recycled, not merely moved off the caller's arena",
+		grew_bytes,
+		ROWS,
+	)
+
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+}

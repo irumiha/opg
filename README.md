@@ -522,8 +522,11 @@ All unit tests run offline without requiring a database:
 odin test tests -all-packages -vet -strict-style
 ```
 
-### Running Integration Tests (Dockerized PostgreSQL)
-The integration suite automatically starts a real PostgreSQL 17 instance via Docker Compose (with self-signed TLS certificates and auth scenarios) and tests the entire driver against live PostgreSQL:
+### Running Integration Tests Locally
+The integration test suite can be run using either the automated Docker Compose harness or an existing PostgreSQL instance:
+
+#### Option A: Docker Compose (Default)
+When `PGHOST` is unset, `scripts/integration-test.sh` automatically starts a PostgreSQL 17 container with TLS certificates and authentication test scenarios:
 
 ```bash
 # Standard integration tests
@@ -538,6 +541,25 @@ scripts/integration-test.sh --tsan
 # Run all test suites and sanitizers
 scripts/integration-test.sh --all
 ```
+
+#### Option B: External or Native PostgreSQL Instance
+If `PGHOST` is set, test scripts and harnesses bypass Docker and connect directly to the specified PostgreSQL instance:
+
+```bash
+PGHOST=127.0.0.1 PGPORT=5432 PGUSER=opg PGPASSWORD=opg PGDATABASE=opg_test \
+  odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true
+```
+
+### Multi-OS Continuous Integration (GitHub Actions)
+Every commit and pull request is validated across a 3-platform matrix (**Ubuntu**, **macOS**, **Windows**):
+
+1. **Offline Gate**: Strict compilation check (`odin check . -no-entry-point -vet -strict-style`) and zero-network unit test validation on all 3 operating systems.
+2. **Multi-OS Integration Matrix**: Automated native PostgreSQL 17 provisioning with SSL enabled via `ikalnytskyi/action-setup-postgres@v8` on Linux, macOS, and Windows runners. `scripts/ci-setup-postgres.sh` configures test authentication roles (`opg_clear`, `opg_md5`).
+3. **Platform-Native TLS Verification**: Live integration tests exercise each OS's native cryptographic backend over TLS:
+   - **Linux**: OpenSSL 3.x (`libssl.so.3`)
+   - **macOS**: Apple SecureTransport (`Security.framework`)
+   - **Windows**: Microsoft SSPI Schannel (`secur32.dll` / `sspicli.dll`)
+4. **Sanitizers**: Linux CI runs AddressSanitizer (`-sanitize:address`) for memory safety and ThreadSanitizer (`-sanitize:thread`) on `pgconn` for connection pool concurrency and race detection.
 
 ---
 

@@ -23,11 +23,13 @@ extract_rows_affected :: proc(tag: string) -> i64 {
 	conn_query executes a SQL query string using PostgreSQL Simple Query protocol ('Q').
 	Streams rows, command completion tags, and descriptors to provided callbacks.
 
-	MEMORY LIFETIME:
+	ERROR OWNERSHIP:
 	If the server returns a Postgres_Error, its string fields are cloned into
-	`context.temp_allocator` to survive the query execution loop. Callers wishing
-	to retain the error beyond the current frame/temp-arena cycle must clone it
-	using `pgerr.postgres_error_clone(err.(pgerr.Postgres_Error), allocator)`.
+	`conn.allocator` and belong to the caller. Free them with
+	`pgerr.postgres_error_destroy(err.(pgerr.Postgres_Error), conn.allocator)`.
+
+	Every Postgres_Error this driver returns follows that one rule, connect
+	included, so teardown never depends on which call produced the value.
 */
 conn_query :: proc(
 	conn: ^Conn,
@@ -89,7 +91,7 @@ conn_query :: proc(
 
 		case pgproto.Msg_Error_Response:
 			if var_recorded_err == nil {
-				cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+				cloned_err, _ := pgerr.postgres_error_clone(m.error, conn.allocator)
 				var_recorded_err = cloned_err
 			}
 

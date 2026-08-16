@@ -423,6 +423,7 @@ when OPG_INTEGRATION {
 		testing.expectf(t, ok, "expected Postgres_Error from canceled query, got %v", qerr)
 		if ok {
 			testing.expect_value(t, pg_err.code, "57014") // query_canceled
+			pgerr.postgres_error_destroy(pg_err, conn.allocator)
 		}
 
 		// Connection must be fully usable afterward.
@@ -515,6 +516,7 @@ when OPG_INTEGRATION {
 		testing.expectf(t, ok, "expected Postgres_Error, got %v", qerr)
 		if ok {
 			testing.expect_value(t, pg_err.code, "42P01") // undefined_table
+			pgerr.postgres_error_destroy(pg_err, conn.allocator)
 		}
 
 		// The connection drained to ReadyForQuery and stays usable.
@@ -535,6 +537,9 @@ when OPG_INTEGRATION {
 		// An error inside a transaction moves it to failed state.
 		bad_err := conn_query(conn, "SELECT 1/0;")
 		testing.expect(t, bad_err != nil, "expected division by zero error")
+		if pg, is_pg := bad_err.(pgerr.Postgres_Error); is_pg {
+			pgerr.postgres_error_destroy(pg, conn.allocator)
+		}
 		testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
 
 		testing.expect(t, conn_query(conn, "ROLLBACK;") == nil, "expected ROLLBACK success")
@@ -682,6 +687,7 @@ when OPG_INTEGRATION {
 		testing.expectf(t, ok, "expected Postgres_Error, got %v", qerr)
 		if ok {
 			testing.expect_value(t, pg_err.code, "22P02") // invalid_text_representation
+			pgerr.postgres_error_destroy(pg_err, conn.allocator)
 		}
 
 		// Extended-protocol errors drain through Sync back to Ready.
@@ -735,6 +741,7 @@ when OPG_INTEGRATION {
 		pg_err, ok := e3.(pgerr.Postgres_Error)
 		if ok {
 			testing.expect_value(t, pg_err.code, "26000") // invalid_sql_statement_name
+			pgerr.postgres_error_destroy(pg_err, conn.allocator)
 		} else {
 			// Driver may reject unknown statements client-side before touching
 			// the server; any error is acceptable, silence is not.

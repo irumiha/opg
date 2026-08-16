@@ -335,6 +335,8 @@ test_conn_query_error_response :: proc(t: ^testing.T) {
 	testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
 	testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Failed_Transaction)
 
+	pgerr.postgres_error_destroy(pg_err, conn.allocator)
+
 	conn_close(conn)
 	free(conn, context.allocator)
 
@@ -659,6 +661,8 @@ test_conn_query_error_response_and_drain :: proc(t: ^testing.T) {
 	testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
 	testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Failed_Transaction)
 
+	pgerr.postgres_error_destroy(pg_err, conn.allocator)
+
 	conn_close(conn)
 	free(conn, context.allocator)
 	mock_transport_destroy(&mock)
@@ -962,6 +966,8 @@ test_conn_exec_params_error_response :: proc(t: ^testing.T) {
 	testing.expect_value(t, pg_err.message, "syntax error")
 	testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
 	testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Failed_Transaction)
+
+	pgerr.postgres_error_destroy(pg_err, conn.allocator)
 
 	conn_close(conn)
 	free(conn, context.allocator)
@@ -1312,6 +1318,7 @@ test_conn_prepare_server_error_and_unexpected :: proc(t: ^testing.T) {
 	case pgerr.Postgres_Error:
 		testing.expect_value(t, e.code, "42601")
 		testing.expect_value(t, e.message, "syntax error")
+		pgerr.postgres_error_destroy(e, conn.allocator)
 	case:
 		testing.expect(t, false, "expected Postgres_Error")
 	}
@@ -1493,6 +1500,7 @@ test_conn_close_portal_and_close_statement_variations :: proc(t: ^testing.T) {
 	#partial switch e in cp_err2 {
 	case pgerr.Postgres_Error:
 		testing.expect_value(t, e.code, "34000")
+		pgerr.postgres_error_destroy(e, conn.allocator)
 	case:
 		testing.expect(t, false, "expected Postgres_Error")
 	}
@@ -1526,6 +1534,9 @@ test_conn_close_portal_and_close_statement_variations :: proc(t: ^testing.T) {
 	append(&mock.read_chunks, rfq)
 	cs_err2 := conn_close_statement(conn, "stmt_err")
 	testing.expect(t, cs_err2 != nil, "expected close_statement error")
+	if pg, is_pg := cs_err2.(pgerr.Postgres_Error); is_pg {
+		pgerr.postgres_error_destroy(pg, conn.allocator)
+	}
 
 	// 6. conn_close_statement with unexpected message
 	append(&mock.read_chunks, cmd_packet)
@@ -1611,6 +1622,7 @@ test_conn_exec_prepared_errors_and_edge_cases :: proc(t: ^testing.T) {
 	#partial switch e in err2 {
 	case pgerr.Postgres_Error:
 		testing.expect_value(t, e.code, "22012")
+		pgerr.postgres_error_destroy(e, conn.allocator)
 	case:
 		testing.expect(t, false, "expected Postgres_Error")
 	}
@@ -1733,6 +1745,8 @@ test_conn_exec_params_error_drain :: proc(t: ^testing.T) {
 	testing.expect(t, ok, "expected Postgres_Error")
 	testing.expect_value(t, pg_err.code, "22P02")
 	testing.expect_value(t, conn.status, Conn_Status.Ready)
+
+	pgerr.postgres_error_destroy(pg_err, conn.allocator)
 
 	conn_close(conn)
 	free(conn, context.allocator)
@@ -1901,16 +1915,84 @@ test_conn_prepare_parse_failure_after_close_removes_cache :: proc(t: ^testing.T)
 	pg_err, ok := err2.(pgerr.Postgres_Error)
 	testing.expect(t, ok, "expected Postgres_Error")
 	testing.expect_value(t, pg_err.code, "42601")
-	_ = pg_err // cloned into context.temp_allocator by the query loop; not tracked here
+	pgerr.postgres_error_destroy(pg_err, conn.allocator)
 
 	// The stale entry must be gone: the server closed "s1" on CloseComplete,
 	// so the cache must not keep a reference to a non-existent server statement.
 	testing.expect(t, !("s1" in conn.prepared_statements), "stale statement must be removed after Close+Parse failure")
 	testing.expect_value(t, conn.status, Conn_Status.Failed_Transaction)
 
-	// Note: the recorded Parse error is cloned into context.temp_allocator by
-	// the execution loop (same pattern as every query error); it is not
-	// tracked by `track` and is reclaimed with the temp allocator.
+	conn_close(conn)
+	free(conn, context.allocator)
+	mock_transport_destroy(&mock)
+
+	testing.expect_value(t, len(track.allocation_map), 0)
+}
+
+/*
+	A Postgres_Error the driver hands back is the caller's to free, whichever
+	call produced it.
+
+	The rule has to be a single rule. One public postgres_error_destroy applies
+	to every Postgres_Error, and nothing about the value says which allocator
+	built it. Cloning execution errors into the temp arena while connect errors
+	came from the connection's allocator made correct teardown depend on
+	invisible provenance: destroy an execution error and it is an invalid free,
+	skip a connect error and it leaks.
+
+	Presence in the tracking allocator is what pins this down. A temp-cloned
+	error is simply absent from it, so the assertion cannot pass by accident.
+*/
+@(test)
+test_conn_query_error_belongs_to_the_connection_allocator :: proc(t: ^testing.T) {
+	track: mem.Tracking_Allocator
+	mem.tracking_allocator_init(&track, context.allocator)
+	defer mem.tracking_allocator_destroy(&track)
+	context.allocator = mem.tracking_allocator(&track)
+
+	mock: Mock_Transport
+	mock_transport_init(&mock)
+
+	transport := make_mock_transport(&mock)
+	conn := new(Conn, context.allocator)
+	conn.allocator = context.allocator
+	conn.status = .Ready
+	conn.parameters = make(map[string]string, 16, context.allocator)
+	stream_init(&conn.stream, transport, allocator = context.allocator)
+
+	err_packet := []byte {
+		'E', 0, 0, 0, 33,
+		'S', 'E', 'R', 'R', 'O', 'R', 0,
+		'C', '4', '2', '6', '0', '1', 0,
+		'M', 's', 'y', 'n', 't', 'a', 'x', ' ', 'e', 'r', 'r', 'o', 'r', 0,
+		0,
+	}
+	rfq := []byte{'Z', 0, 0, 0, 5, 'E'}
+
+	append(&mock.read_chunks, err_packet)
+	append(&mock.read_chunks, rfq)
+
+	err := conn_query(conn, "INVALID SQL;")
+
+	pg_err, is_pg := err.(pgerr.Postgres_Error)
+	if !is_pg {
+		testing.fail_now(t, "expected a Postgres_Error")
+	}
+
+	_, caller_owned := track.allocation_map[rawptr(raw_data(pg_err.message))]
+	testing.expect(
+		t,
+		caller_owned,
+		"the error's strings must come from the connection's allocator; a temp-cloned error is not the caller's to free",
+	)
+
+	// The consequence the caller actually cares about: the error outlives the
+	// temp arena, so it can be reported after cleanup has run.
+	free_all(context.temp_allocator)
+	testing.expect_value(t, pg_err.code, "42601")
+	testing.expect_value(t, pg_err.message, "syntax error")
+
+	pgerr.postgres_error_destroy(pg_err, conn.allocator)
 
 	conn_close(conn)
 	free(conn, context.allocator)

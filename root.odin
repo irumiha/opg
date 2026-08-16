@@ -57,7 +57,30 @@ Postgres_Error         :: pgerr.Postgres_Error
 Pool_Error             :: pgerr.Pool_Error
 Pool_Error_Type        :: pgerr.Pool_Error_Type
 
-// Helpers for managing Postgres_Error fields
+/*
+	POSTGRES_ERROR OWNERSHIP
+
+	Every Postgres_Error this driver returns is yours to free, and there is only
+	one rule for all of them:
+
+	    conn, err := opg.connect(cfg)                 // cloned into the allocator
+	    if pg, ok := err.(opg.Postgres_Error); ok {   // you passed to connect
+	        opg.postgres_error_destroy(pg, context.allocator)
+	    }
+
+	    _, err := opg.exec(conn, "...")               // cloned into conn.allocator,
+	    if pg, ok := err.(opg.Postgres_Error); ok {   // which is that same allocator
+	        opg.postgres_error_destroy(pg, conn.allocator)
+	    }
+
+	The strings hang off the allocator the connection was opened with, so the
+	same call frees an error raised on any thread that shares the connection.
+	A connect failure has no Conn to read it from, so use the allocator you
+	passed to connect (context.allocator by default).
+
+	The other error variants — Net_Error, Protocol_Error, Auth_Error, Pool_Error
+	— carry no allocations and need no teardown.
+*/
 postgres_error_destroy :: pgerr.postgres_error_destroy
 postgres_error_clone   :: pgerr.postgres_error_clone
 
@@ -202,6 +225,8 @@ OID_JSONB              :: pgmap.OID_JSONB
 
 	Returns:
 	  - A pointer to the initialized Conn, or an Error on failure.
+	    A Postgres_Error here is allocated from `allocator` and is yours to
+	    free — see POSTGRES_ERROR OWNERSHIP above.
 
 	Example:
 	  conn, err := opg.connect({
@@ -399,7 +424,8 @@ query_slice :: proc(
 
 	Returns:
 	  - rows_affected: Number of rows modified (e.g. from "INSERT 0 1" or "UPDATE 5").
-	  - Error on failure.
+	  - Error on failure. A Postgres_Error here is allocated from
+	    conn.allocator and is yours to free — see POSTGRES_ERROR OWNERSHIP above.
 
 	Example:
 	  rows, err := opg.exec(conn, "UPDATE users SET is_active = $1 WHERE last_login < $2;", false, cutoff_time)

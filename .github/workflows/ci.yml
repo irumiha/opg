@@ -1,6 +1,6 @@
 # opg CI – offline gate on all three platforms; Linux integration + sanitizers.
 #
-# Odin nightly pin: dev-2026-08. Bump the ODIN_REF value to update.
+# Odin compiler: installed via laytan/setup-odin@v2 (nightly channel).
 # macOS/Windows integration testing deferred to OPG-502 (native TLS backends).
 
 name: CI
@@ -11,11 +11,6 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  # Pin: Odin nightly tag. Bump this single value to update all runners.
-  # https://github.com/odin-lang/Odin/releases
-  ODIN_REF: dev-2026-08
-
 jobs:
   # --------------------------------------------------------------------------
   # Offline gate: compile + unit tests (no database required).
@@ -25,66 +20,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            odin_archive: odin-ubuntu-amd64-nightly+date-2026-08-15.tar.gz
-            odin_dir: odin-linux-amd64-nightly+date-2026-08-15
-          - os: macos-latest
-            odin_archive: odin-macos-amd64-nightly+date-2026-08-15.tar.gz
-            odin_dir: odin-macos-amd64-nightly+date-2026-08-15
-          - os: windows-latest
-            odin_archive: odin-windows-amd64-nightly+date-2026-08-15.zip
-            odin_dir: odin-windows-amd64-nightly+date-2026-08-15
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     runs-on: ${{ matrix.os }}
     name: offline (${{ matrix.os }})
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Odin compiler
-        id: cache-odin
-        uses: actions/cache@v4
+      - name: Install Odin
+        uses: laytan/setup-odin@v2
         with:
-          path: ${{ runner.temp }}/odin
-          key: odin-${{ matrix.os }}-${{ env.ODIN_REF }}
-
-      - name: Install Odin (Linux)
-        if: runner.os == 'Linux' && steps.cache-odin.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/odin"
-          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/${{ env.ODIN_REF }}/${{ matrix.odin_archive }}" \
-            -o "$RUNNER_TEMP/odin.tar.gz"
-          tar -xzf "$RUNNER_TEMP/odin.tar.gz" -C "$RUNNER_TEMP/odin" --strip-components=1
-          rm "$RUNNER_TEMP/odin.tar.gz"
-
-      - name: Install Odin (macOS)
-        if: runner.os == 'macOS' && steps.cache-odin.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/odin"
-          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/${{ env.ODIN_REF }}/${{ matrix.odin_archive }}" \
-            -o "$RUNNER_TEMP/odin.tar.gz"
-          tar -xzf "$RUNNER_TEMP/odin.tar.gz" -C "$RUNNER_TEMP/odin" --strip-components=1
-          rm "$RUNNER_TEMP/odin.tar.gz"
-
-      - name: Install Odin (Windows)
-        if: runner.os == 'Windows' && steps.cache-odin.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\odin"
-          $url = "https://github.com/odin-lang/Odin/releases/download/${{ env.ODIN_REF }}/${{ matrix.odin_archive }}"
-          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\odin.zip"
-          Expand-Archive -Path "$env:RUNNER_TEMP\odin.zip" -DestinationPath "$env:RUNNER_TEMP\odin-extract"
-          # The zip typically contains a single top-level directory; move its contents up.
-          $inner = Get-ChildItem "$env:RUNNER_TEMP\odin-extract" | Select-Object -First 1
-          Copy-Item -Path "$($inner.FullName)\*" -Destination "$env:RUNNER_TEMP\odin" -Recurse -Force
-          Remove-Item "$env:RUNNER_TEMP\odin.zip" -Force
-          Remove-Item "$env:RUNNER_TEMP\odin-extract" -Recurse -Force
-
-      - name: Add Odin to PATH
-        shell: bash
-        run: echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
+          release: nightly
 
       - name: Verify Odin installation
         shell: bash
@@ -109,26 +55,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Cache Odin compiler
-        id: cache-odin
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}/odin
-          key: odin-ubuntu-latest-${{ env.ODIN_REF }}
-
       - name: Install Odin
-        if: steps.cache-odin.outputs.cache-hit != 'true'
-        shell: bash
-        run: |
-          mkdir -p "$RUNNER_TEMP/odin"
-          curl -fsSL "https://github.com/odin-lang/Odin/releases/download/${{ env.ODIN_REF }}/odin-ubuntu-amd64-nightly+date-2026-08-15.tar.gz" \
-            -o "$RUNNER_TEMP/odin.tar.gz"
-          tar -xzf "$RUNNER_TEMP/odin.tar.gz" -C "$RUNNER_TEMP/odin" --strip-components=1
-          rm "$RUNNER_TEMP/odin.tar.gz"
-
-      - name: Add Odin to PATH
-        shell: bash
-        run: echo "$RUNNER_TEMP/odin" >> "$GITHUB_PATH"
+        uses: laytan/setup-odin@v2
+        with:
+          release: nightly
 
       - name: Start PostgreSQL (docker compose)
         run: docker compose up -d --wait postgres

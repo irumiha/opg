@@ -2,8 +2,7 @@ package pgconn
 
 // Dynamically-loaded OpenSSL 3 backend. No link-time dependency: symbols
 // are bound at runtime with core:dynlib; absence degrades per SSL_Mode.
-// Native Schannel/SecureTransport backends are deferred (see the OPG-205
-// design spec) - OpenSSL names are probed on every OS.
+// OpenSSL names are probed on Linux and as fallback on macOS and Windows.
 
 import "core:c"
 import "core:dynlib"
@@ -55,6 +54,9 @@ openssl: OpenSSL_API
 	symbols are missing, so the bound-symbol count is checked too.
 */
 tls_probe_into :: proc(api: ^OpenSSL_API, paths: []string) -> bool {
+	if api.__handle != nil && api.SSL_read != nil {
+		return true
+	}
 	for path in paths {
 		count, ok := dynlib.initialize_symbols(api, path)
 		if ok && count == TLS_SYMBOL_COUNT {
@@ -68,22 +70,13 @@ tls_probe_into :: proc(api: ^OpenSSL_API, paths: []string) -> bool {
 	return false
 }
 
-// TLS_Transport_Data is the concrete state for an OpenSSL-wrapped socket.
-TLS_Transport_Data :: struct {
-	ctx:           rawptr, // SSL_CTX*
-	ssl:           rawptr, // SSL*
-	socket:        net.TCP_Socket,
-	read_timeout:  time.Duration,
-	write_timeout: time.Duration,
-}
-
 /*
-	make_tls_transport performs the client TLS handshake over an already
+	make_openssl_transport performs the client TLS handshake over an already
 	connected socket and returns a Stream_Transport backed by OpenSSL.
 	On failure everything created here is freed and the caller keeps
 	ownership of the (still open) socket. Requires a successful probe.
 */
-make_tls_transport :: proc(
+make_openssl_transport :: proc(
 	data: ^TLS_Transport_Data,
 	socket: net.TCP_Socket,
 	server_name: string,
@@ -119,30 +112,31 @@ make_tls_transport :: proc(
 		return {}, pgerr.Net_Error{type = .TLS_Handshake_Failed}
 	}
 
-	data.ctx = ctx
-	data.ssl = ssl
+	data.backend = .OpenSSL
+	data.openssl_ctx = ctx
+	data.openssl_ssl = ssl
 	data.socket = socket
 	return Stream_Transport{
 		data = data,
-		read = tls_read,
-		write = tls_write,
-		close = tls_close,
-		set_deadlines = tls_set_deadlines,
+		read = openssl_read,
+		write = openssl_write,
+		close = openssl_close,
+		set_deadlines = openssl_set_deadlines,
 	}, nil
 }
 
-tls_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr.Error) {
+openssl_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr.Error) {
 	data := (^TLS_Transport_Data)(transport)
 	if len(buf) == 0 {
 		return 0, nil
 	}
 	want_retries := 0
 	for {
-		ret := openssl.SSL_read(data.ssl, raw_data(buf), c.int(len(buf)))
+		ret := openssl.SSL_read(data.openssl_ssl, raw_data(buf), c.int(len(buf)))
 		if ret > 0 {
 			return int(ret), nil
 		}
-		code := openssl.SSL_get_error(data.ssl, ret)
+		code := openssl.SSL_get_error(data.openssl_ssl, ret)
 		switch code {
 		case SSL_ERROR_WANT_READ, SSL_ERROR_WANT_WRITE:
 			want_retries += 1
@@ -158,19 +152,19 @@ tls_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr
 	}
 }
 
-tls_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written: int, err: pgerr.Error) {
+openssl_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written: int, err: pgerr.Error) {
 	data := (^TLS_Transport_Data)(transport)
 	total := 0
 	want_retries := 0
 	for total < len(data_bytes) {
 		remaining := data_bytes[total:]
-		ret := openssl.SSL_write(data.ssl, raw_data(remaining), c.int(len(remaining)))
+		ret := openssl.SSL_write(data.openssl_ssl, raw_data(remaining), c.int(len(remaining)))
 		if ret > 0 {
 			total += int(ret)
 			want_retries = 0 // successful write resets the counter
 			continue
 		}
-		code := openssl.SSL_get_error(data.ssl, ret)
+		code := openssl.SSL_get_error(data.openssl_ssl, ret)
 		if code == SSL_ERROR_WANT_READ || code == SSL_ERROR_WANT_WRITE {
 			want_retries += 1
 			if want_retries > TLS_MAX_WANT_RETRIES {
@@ -187,25 +181,23 @@ tls_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written: int,
 	return total, nil
 }
 
-tls_close :: proc(transport: rawptr) {
+openssl_close :: proc(transport: rawptr) {
 	data := (^TLS_Transport_Data)(transport)
-	if data.ssl != nil {
-		_ = openssl.SSL_shutdown(data.ssl) // best-effort close_notify
-		openssl.SSL_free(data.ssl)
-		data.ssl = nil
+	if data.openssl_ssl != nil {
+		_ = openssl.SSL_shutdown(data.openssl_ssl) // best-effort close_notify
+		openssl.SSL_free(data.openssl_ssl)
+		data.openssl_ssl = nil
 	}
-	if data.ctx != nil {
-		openssl.SSL_CTX_free(data.ctx)
-		data.ctx = nil
+	if data.openssl_ctx != nil {
+		openssl.SSL_CTX_free(data.openssl_ctx)
+		data.openssl_ctx = nil
 	}
 	net.close(data.socket)
 }
 
-tls_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: time.Duration) -> pgerr.Error {
+openssl_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: time.Duration) -> pgerr.Error {
 	data := (^TLS_Transport_Data)(transport)
 	data.read_timeout = read_timeout
 	data.write_timeout = write_timeout
-	// Note: OS-level socket timeout configuration can be hooked here (same
-	// stub level as tcp_set_deadlines).
 	return nil
 }

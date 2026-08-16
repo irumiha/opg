@@ -36,8 +36,12 @@ Conn                   :: pgconn.Conn
 Conn_Config            :: pgconn.Conn_Config
 Conn_Status            :: pgconn.Conn_Status
 SSL_Mode               :: pgconn.SSL_Mode
+TLS_Backend_Type       :: pgconn.TLS_Backend_Type
 Pool                   :: pgconn.Pool
 Pool_Config            :: pgconn.Pool_Config
+
+tls_backend_type       :: pgconn.tls_backend_type
+tls_backend_name       :: pgconn.tls_backend_name
 
 // ----------------------------------------------------------------------------
 // Re-exported ORM & OID Types

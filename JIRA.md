@@ -478,7 +478,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-502] Native TLS Backends via `core:dynlib` (Schannel & SecureTransport)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: `pgconn`
 - **Files**:
   - `pgconn/tls.odin` (backend-selection refactor)

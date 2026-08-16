@@ -932,4 +932,23 @@ when OPG_INTEGRATION {
 		testing.expect_value(t, conn.status, Conn_Status.Ready)
 	}
 
+	@(test)
+	test_integration_tls_active_backend_matches_platform :: proc(t: ^testing.T) {
+		loaded := tls_ensure_loaded()
+		testing.expect(t, loaded, "expected TLS to load on integration test host")
+		btype := tls_backend_type()
+		bname := tls_backend_name()
+
+		when ODIN_OS == .Linux {
+			testing.expect_value(t, btype, TLS_Backend_Type.OpenSSL)
+			testing.expect_value(t, bname, "OpenSSL")
+		} else when ODIN_OS == .Darwin {
+			testing.expect_value(t, btype, TLS_Backend_Type.SecureTransport)
+			testing.expect_value(t, bname, "SecureTransport")
+		} else when ODIN_OS == .Windows {
+			testing.expect_value(t, btype, TLS_Backend_Type.Schannel)
+			testing.expect_value(t, bname, "Schannel")
+		}
+	}
+
 } // when OPG_INTEGRATION

@@ -115,7 +115,7 @@ test_tls_probe_real_openssl :: proc(t: ^testing.T) {
 	// itself degrades gracefully without it).
 	when ODIN_OS == .Linux {
 		probe: OpenSSL_API
-		ok := tls_probe_into(&probe, TLS_PROBE_PATHS)
+		ok := tls_probe_into(&probe, TLS_OPENSSL_PATHS)
 		testing.expect(t, ok, "expected OpenSSL to load on Linux dev machine")
 		testing.expect(t, probe.SSL_CTX_new != nil, "expected SSL_CTX_new bound")
 		testing.expect(t, probe.SSL_connect != nil, "expected SSL_connect bound")
@@ -141,4 +141,48 @@ test_ssl_negotiate_transport_errors :: proc(t: ^testing.T) {
 
 	_, err2 := ssl_negotiate(make_mock_transport(&mock2), .Require, true)
 	testing.expect(t, err2 != nil, "expected error from read failure")
+}
+
+// ----------------------------------------------------------------------------
+// Backend Selection & Fallback Tests (OPG-502)
+// ----------------------------------------------------------------------------
+
+@(test)
+test_tls_backend_selection_and_names :: proc(t: ^testing.T) {
+	loaded := tls_ensure_loaded()
+	btype := tls_backend_type()
+	bname := tls_backend_name()
+
+	if loaded {
+		testing.expect(t, btype != .None, "expected loaded backend to not be .None")
+		testing.expect(t, len(bname) > 0 && bname != "none", "expected non-empty backend name")
+		when ODIN_OS == .Linux {
+			testing.expect_value(t, btype, TLS_Backend_Type.OpenSSL)
+			testing.expect_value(t, bname, "OpenSSL")
+		} else when ODIN_OS == .Darwin {
+			testing.expect(t, btype == .SecureTransport || btype == .OpenSSL, "expected SecureTransport or OpenSSL on macOS")
+		} else when ODIN_OS == .Windows {
+			testing.expect(t, btype == .Schannel || btype == .OpenSSL, "expected Schannel or OpenSSL on Windows")
+		}
+	} else {
+		testing.expect_value(t, btype, TLS_Backend_Type.None)
+		testing.expect_value(t, bname, "none")
+	}
+}
+
+@(test)
+test_tls_backend_injected_fallback_order :: proc(t: ^testing.T) {
+	// Test injected empty backend list -> resolves to None
+	none_result := tls_probe_backends([]TLS_Backend_Type{})
+	testing.expect_value(t, none_result, TLS_Backend_Type.None)
+
+	// Test injected None list -> resolves to None
+	none_result2 := tls_probe_backends([]TLS_Backend_Type{.None})
+	testing.expect_value(t, none_result2, TLS_Backend_Type.None)
+
+	// On Linux, OpenSSL should resolve if requested
+	when ODIN_OS == .Linux {
+		openssl_result := tls_probe_backends([]TLS_Backend_Type{.OpenSSL})
+		testing.expect_value(t, openssl_result, TLS_Backend_Type.OpenSSL)
+	}
 }

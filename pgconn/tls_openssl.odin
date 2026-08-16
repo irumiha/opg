@@ -107,10 +107,18 @@ make_openssl_transport :: proc(
 		_ = openssl.SSL_ctrl(ssl, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, rawptr(host_c))
 	}
 
-	if openssl.SSL_connect(ssl) != 1 {
+	if ret := openssl.SSL_connect(ssl); ret != 1 {
+		// A socket deadline expires as EAGAIN, which OpenSSL reports as
+		// WANT_READ/WANT_WRITE. That is the configured timeout firing, not the
+		// server refusing the handshake, and callers separate the two: one is
+		// worth retrying against a slow peer, the other is not.
+		code := openssl.SSL_get_error(ssl, ret)
 		openssl.SSL_free(ssl)
 		openssl.SSL_CTX_free(ctx)
-		return {}, pgerr.Net_Error{type = .TLS_Handshake_Failed}
+		if code == SSL_ERROR_WANT_READ || code == SSL_ERROR_WANT_WRITE {
+			return {}, pgerr.Net_Error{type = .Timeout}
+		}
+		return {}, pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(code)}
 	}
 
 	data.backend = .OpenSSL

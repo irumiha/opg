@@ -247,6 +247,33 @@ conn_connect :: proc(
 		}
 	}
 
+	// Bound the socket before anything reads from it. Connect runs two
+	// exchanges before the transport is final — the SSLRequest reply and the
+	// TLS handshake — and both block on a peer that completes the TCP
+	// connection and then goes quiet. Deadlines applied only once the
+	// transport exists leave those two unbounded, which is what turns a
+	// failing TLS backend into a hung connect instead of an error.
+	//
+	// connect_timeout governs this phase when set. read_timeout stands in for
+	// it otherwise, so a caller who configured only the latter still gets a
+	// connect that ends — but the two describe different things, and this
+	// phase is the several round trips of negotiation, handshake and auth
+	// rather than any single read.
+	connect_deadline := config.connect_timeout
+	if connect_deadline <= 0 do connect_deadline = config.read_timeout
+	if connect_deadline > 0 {
+		derr := apply_socket_deadlines(socket, connect_deadline, connect_deadline)
+		if derr != nil {
+			net.close(socket)
+			return nil, derr
+		}
+		// The TLS backends bound their own retry loops on elapsed time against
+		// these fields, and the handshake runs before set_deadlines below has
+		// recorded them.
+		c.tls_data.read_timeout = connect_deadline
+		c.tls_data.write_timeout = connect_deadline
+	}
+
 	transport := make_tcp_transport(&c.tcp_data, socket)
 
 	// Pre-startup TLS negotiation (SSLRequest). On Wrap_TLS the socket is
@@ -266,22 +293,29 @@ conn_connect :: proc(
 		transport = tls_transport
 	}
 
-	// Apply the configured deadlines now that the final transport is known;
-	// applying them earlier would attach them to a plaintext transport the TLS
-	// path then discards. The zero value leaves the socket blocking, so a
-	// caller that set no timeouts sees no change.
-	if config.read_timeout > 0 || config.write_timeout > 0 {
-		if derr := transport.set_deadlines(
-			transport.data,
+	ready, herr := conn_handshake(c, config, transport, allocator)
+	if herr != nil {
+		return nil, herr
+	}
+
+	// Connect is over; hand the socket to the query deadlines.
+	//
+	// This has to run whenever a connect deadline was installed, even when both
+	// query timeouts are zero. Otherwise a connection configured with
+	// connect_timeout alone keeps that short deadline for the rest of its life
+	// and the first slow query fails against a timeout the caller scoped to
+	// connecting. set_deadlines passes a zero duration through as "clear".
+	if connect_deadline > 0 || config.read_timeout > 0 || config.write_timeout > 0 {
+		if derr := ready.stream.transport.set_deadlines(
+			ready.stream.transport.data,
 			config.read_timeout,
 			config.write_timeout,
 		); derr != nil {
-			transport.close(transport.data)
 			return nil, derr
 		}
 	}
 
-	return conn_handshake(c, config, transport, allocator)
+	return ready, nil
 }
 
 conn_close :: proc(conn: ^Conn) {

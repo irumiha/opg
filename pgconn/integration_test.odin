@@ -1014,4 +1014,35 @@ when OPG_INTEGRATION {
 		testing.expectf(t, qerr == nil, "expected the slow query to complete, got %v", qerr)
 	}
 
+	@(test)
+	test_integration_connect_timeout_does_not_outlive_connect :: proc(t: ^testing.T) {
+		// connect_timeout bounds connecting, not the connection. It is applied
+		// to the socket before the SSLRequest exchange so a peer that goes
+		// quiet cannot hang connect; the matching obligation is to take it back
+		// off once the handshake is done. Leave it on and every query inherits
+		// a deadline the caller scoped to connecting, which shows up much later
+		// as an unexplained timeout on the first slow statement.
+		cfg := integration_conn_config(t)
+		cfg.connect_timeout = 300 * time.Millisecond
+		cfg.read_timeout = 0
+		cfg.write_timeout = 0
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected connect success, got %v", err)
+		if conn == nil {
+			return
+		}
+		defer integration_disconnect(conn)
+
+		// Comfortably longer than connect_timeout: only a socket that had the
+		// connect deadline cleared can see this through.
+		qerr := conn_query(conn, "SELECT pg_sleep(1);", nil, nil, nil, nil)
+		testing.expectf(
+			t,
+			qerr == nil,
+			"expected the slow query to complete, got %v; connect_timeout outlived connect",
+			qerr,
+		)
+	}
+
 } // when OPG_INTEGRATION

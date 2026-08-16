@@ -191,10 +191,20 @@ make_secure_transport :: proc(
 	// socket timeout as errSSLWouldBlock, so an unbounded loop here turns a
 	// peer that goes quiet mid-handshake into a permanent hang inside connect.
 	retries := 0
+	start := time.now()
 	for {
 		status := sec_trans.SSLHandshake(ctx)
 		if status == noErr {
 			break
+		}
+
+		// A socket deadline surfaces here as errSSLWouldBlock, indistinguishable
+		// from a peer that is merely slow. Counting retries alone multiplies the
+		// configured timeout by the retry budget, so elapsed time is what bounds
+		// a handshake against a deadline.
+		if tls_deadline_exceeded(start, data.read_timeout) {
+			sec_trans.CFRelease(ctx)
+			return {}, pgerr.Net_Error{type = .Timeout}
 		}
 
 		retries += 1

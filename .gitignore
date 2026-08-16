@@ -3,3 +3,8 @@
 build/
 *.bin
 !pgproto/tests_golden_files/*.bin
+
+# Test binaries dropped in the repo root by `odin test <pkg>` (named after
+# the package, so they have no extension to match on).
+/opg
+/tests

@@ -13,8 +13,11 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Ensure docker compose postgres is up only if targeting local docker (PGHOST unset)
-if [ -z "${PGHOST:-}" ]; then
+# Start the docker-compose postgres only when no external server was requested.
+# Either PGHOST or PGPORT is enough to mean "target that one instead": a
+# PGPORT-only override points at a native server on this host, and starting
+# compose as well would just contend for the port.
+if [ -z "${PGHOST:-}" ] && [ -z "${PGPORT:-}" ]; then
   docker compose up -d --wait postgres
 fi
 

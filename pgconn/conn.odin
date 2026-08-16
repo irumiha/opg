@@ -266,6 +266,21 @@ conn_connect :: proc(
 		transport = tls_transport
 	}
 
+	// Apply the configured deadlines now that the final transport is known;
+	// applying them earlier would attach them to a plaintext transport the TLS
+	// path then discards. The zero value leaves the socket blocking, so a
+	// caller that set no timeouts sees no change.
+	if config.read_timeout > 0 || config.write_timeout > 0 {
+		if derr := transport.set_deadlines(
+			transport.data,
+			config.read_timeout,
+			config.write_timeout,
+		); derr != nil {
+			transport.close(transport.data)
+			return nil, derr
+		}
+	}
+
 	return conn_handshake(c, config, transport, allocator)
 }
 

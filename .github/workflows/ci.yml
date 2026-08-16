@@ -52,6 +52,17 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: integration (${{ matrix.os }})
     needs: offline
+
+    # One definition of where the test suite looks for PostgreSQL. The test
+    # harnesses read these PG* variables directly, so every step below targets
+    # the server provisioned by the setup action without repeating itself.
+    env:
+      PGHOST: '127.0.0.1'
+      PGPORT: '5432'
+      PGUSER: 'opg'
+      PGPASSWORD: 'opg'
+      PGDATABASE: 'opg_test'
+
     steps:
       - uses: actions/checkout@v7
 
@@ -71,45 +82,23 @@ jobs:
           port: 5432
           ssl: true
 
+      # Invoked through bash rather than as ./scripts/... so the run does not
+      # depend on the executable bit surviving checkout on every runner.
       - name: Configure Test Auth Scenarios
         shell: bash
-        env:
-          PGHOST: '127.0.0.1'
-          PGPORT: '5432'
-          PGUSER: 'opg'
-          PGPASSWORD: 'opg'
-          PGDATABASE: 'opg_test'
-        run: ./scripts/ci-setup-postgres.sh
+        run: bash scripts/ci-setup-postgres.sh
 
       - name: Run Integration Tests
         shell: bash
-        env:
-          PGHOST: '127.0.0.1'
-          PGPORT: '5432'
-          PGUSER: 'opg'
-          PGPASSWORD: 'opg'
-          PGDATABASE: 'opg_test'
         run: odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true
 
       # Sanitizers on Linux runner
       - name: Integration tests (AddressSanitizer)
         if: runner.os == 'Linux'
         shell: bash
-        env:
-          PGHOST: '127.0.0.1'
-          PGPORT: '5432'
-          PGUSER: 'opg'
-          PGPASSWORD: 'opg'
-          PGDATABASE: 'opg_test'
         run: odin test tests -all-packages -vet -strict-style -define:OPG_INTEGRATION=true -sanitize:address
 
       - name: Pool concurrency tests (ThreadSanitizer)
         if: runner.os == 'Linux'
         shell: bash
-        env:
-          PGHOST: '127.0.0.1'
-          PGPORT: '5432'
-          PGUSER: 'opg'
-          PGPASSWORD: 'opg'
-          PGDATABASE: 'opg_test'
         run: odin test pgconn -define:OPG_INTEGRATION=true -sanitize:thread

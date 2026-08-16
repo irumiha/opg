@@ -1,33 +1,12 @@
 package opg
 
 @(require) import "core:testing"
-@(require) import "core:os"
-@(require) import "core:strconv"
-@(require) import "core:strings"
+@(require) import "pgconn"
+@(require) import "pgproto"
 
 OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)
 
 when OPG_INTEGRATION {
-
-	get_integration_port :: proc() -> int {
-		if env_port := os.get_env("PGPORT", context.temp_allocator); env_port != "" {
-			if p, ok := strconv.parse_int(env_port); ok do return p
-		}
-		port_state, port_out, _, port_err := os.process_exec(
-			{command = {"docker", "compose", "port", "postgres", "5432"}},
-			context.temp_allocator,
-		)
-		if port_err == nil && port_state.success {
-			endpoint := strings.trim_space(string(port_out))
-			colon := strings.last_index_byte(endpoint, ':')
-			if colon >= 0 {
-				if parsed, ok := strconv.parse_int(endpoint[colon + 1:]); ok {
-					return parsed
-				}
-			}
-		}
-		return 5432
-	}
 
 	Test_Tx_Account :: struct {
 		id:      i32,
@@ -37,13 +16,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_transaction_commit_and_rollback :: proc(t: ^testing.T) {
-		cfg := Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := connect(cfg)
 		if cerr != nil {
@@ -95,13 +68,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_transaction_savepoints :: proc(t: ^testing.T) {
-		cfg := Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := connect(cfg)
 		if cerr != nil {
@@ -141,5 +108,112 @@ when OPG_INTEGRATION {
 		testing.expect_value(t, len(rows), 1)
 		testing.expect_value(t, rows[0].id, i32(1))
 		testing.expect_value(t, rows[0].val, "initial")
+	}
+
+	Release_Row :: struct {
+		id:  i32,
+		val: string,
+	}
+
+	@(test)
+	test_transaction_release_savepoint_and_typed_queries :: proc(t: ^testing.T) {
+		cfg := pgconn.integration_conn_config(t)
+
+		conn, cerr := connect(cfg)
+		if cerr != nil {
+			if pg_err, is_pg := cerr.(Postgres_Error); is_pg {
+				postgres_error_destroy(pg_err, context.allocator)
+			}
+			testing.expect(t, cerr == nil, "connect failed")
+			return
+		}
+		defer disconnect(conn)
+
+		_, ddl_err := exec(conn, "CREATE TEMP TABLE test_release (id int primary key, val text);")
+		testing.expect_value(t, ddl_err, nil)
+
+		tx, tx_err := begin_transaction(conn)
+		testing.expect_value(t, tx_err, nil)
+		defer tx_rollback(&tx)
+
+		_, ins1 := tx_exec(&tx, "INSERT INTO test_release (id, val) VALUES (1, 'first');")
+		testing.expect_value(t, ins1, nil)
+
+		sp_err := tx_savepoint(&tx, "sp_release")
+		testing.expect_value(t, sp_err, nil)
+
+		_, ins2 := tx_exec(&tx, "INSERT INTO test_release (id, val) VALUES (2, 'second');")
+		testing.expect_value(t, ins2, nil)
+
+		// Releasing a savepoint keeps everything done after it; only the
+		// ability to roll back to that point is discarded.
+		rel_err := tx_release_savepoint(&tx, "sp_release")
+		testing.expect_value(t, rel_err, nil)
+
+		single, qs_err := tx_query_struct(&tx, Release_Row, "SELECT id, val FROM test_release WHERE id = $1;", i32(2))
+		testing.expect_value(t, qs_err, nil)
+		testing.expect_value(t, single.val, "second")
+
+		all, ql_err := tx_query_slice(&tx, Release_Row, "SELECT id, val FROM test_release ORDER BY id;")
+		testing.expect_value(t, ql_err, nil)
+		testing.expect_value(t, len(all), 2)
+
+		commit_err := tx_commit(&tx)
+		testing.expect_value(t, commit_err, nil)
+
+		rows, q_err := query_slice(conn, Release_Row, "SELECT id, val FROM test_release ORDER BY id;")
+		testing.expect_value(t, q_err, nil)
+		testing.expect_value(t, len(rows), 2)
+	}
+
+	Count_Row :: struct {
+		cnt: i64,
+	}
+
+	@(test)
+	test_transaction_commit_refused_after_failed_statement :: proc(t: ^testing.T) {
+		cfg := pgconn.integration_conn_config(t)
+
+		conn, cerr := connect(cfg)
+		if cerr != nil {
+			if pg_err, is_pg := cerr.(Postgres_Error); is_pg {
+				postgres_error_destroy(pg_err, context.allocator)
+			}
+			testing.expect(t, cerr == nil, "connect failed")
+			return
+		}
+		defer disconnect(conn)
+
+		_, ddl_err := exec(conn, "CREATE TEMP TABLE test_abort (id int primary key);")
+		testing.expect_value(t, ddl_err, nil)
+
+		tx, tx_err := begin_transaction(conn)
+		testing.expect_value(t, tx_err, nil)
+
+		_, ins_err := tx_exec(&tx, "INSERT INTO test_abort (id) VALUES (1);")
+		testing.expect_value(t, ins_err, nil)
+
+		// A duplicate key aborts the transaction on the server. From here on
+		// PostgreSQL answers COMMIT with a CommandComplete tag of "ROLLBACK"
+		// and no ErrorResponse, which is exactly the case that used to be
+		// reported to the caller as a successful commit.
+		_, dup_err := tx_exec(&tx, "INSERT INTO test_abort (id) VALUES (1);")
+		testing.expect(t, dup_err != nil, "expected a duplicate key error")
+		testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Failed_Transaction)
+
+		commit_err := tx_commit(&tx)
+		testing.expect(t, commit_err != nil, "commit of an aborted transaction must not report success")
+		testing.expect_value(t, tx.committed, false)
+
+		// The refusal leaves the transaction open, so the rollback that
+		// callers customarily defer still clears the connection.
+		rb_err := tx_rollback(&tx)
+		testing.expect_value(t, rb_err, nil)
+		testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Idle)
+
+		// The row the caller might have believed was committed is not there.
+		count, q_err := query_struct(conn, Count_Row, "SELECT count(*) AS cnt FROM test_abort;")
+		testing.expect_value(t, q_err, nil)
+		testing.expect_value(t, count.cnt, i64(0))
 	}
 }

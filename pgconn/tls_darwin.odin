@@ -72,9 +72,19 @@ secure_transport_read_cb :: proc "c" (connection: rawptr, data: rawptr, dataLeng
 		return noErr
 	}
 	buf := ([^]byte)(data)[:wanted]
-	n, rerr := net.recv_tcp(sock, buf)
-	if rerr != .None {
+
+	n: int
+	for {
+		rn, rerr := net.recv_tcp(sock, buf)
+		if rerr == .None {
+			n = rn
+			break
+		}
 		#partial switch rerr {
+		case .Interrupted:
+			// A signal landed mid-recv. Retrying is the whole remedy; the
+			// alternative below would abort a perfectly healthy session.
+			continue
 		case .Would_Block, .Timeout:
 			dataLength^ = 0
 			return errSSLWouldBlock
@@ -105,24 +115,40 @@ secure_transport_write_cb :: proc "c" (connection: rawptr, data: rawptr, dataLen
 		return noErr
 	}
 	buf := ([^]byte)(data)[:to_send]
-	n, serr := net.send_tcp(sock, buf)
-	if serr != .None {
+
+	// net.send_tcp loops internally and reports how much it managed to write
+	// *alongside* any error, so every exit here has to account for `sent`.
+	// Resuming from the front after a partial write, or reporting fewer bytes
+	// than actually reached the socket, makes SecureTransport send those bytes
+	// a second time and corrupts the record stream.
+	sent := 0
+	for sent < to_send {
+		sn, serr := net.send_tcp(sock, buf[sent:])
+		sent += sn
+		if serr == .None do continue
+
 		#partial switch serr {
+		case .Interrupted:
+			// A signal, not a broken connection: resume where it stopped.
+			continue
 		case .Would_Block, .Timeout:
-			dataLength^ = 0
+			dataLength^ = c.size_t(sent)
 			return errSSLWouldBlock
-		case .Connection_Closed, .Not_Connected:
-			dataLength^ = 0
-			return errSSLClosedGraceful
 		case:
-			dataLength^ = 0
+			dataLength^ = c.size_t(sent)
+			// Bytes already on the wire must be acknowledged even though the
+			// connection is failing. Reporting a short write lets the next
+			// call surface the failure with nothing left outstanding, rather
+			// than having SecureTransport retransmit what already went out.
+			if sent > 0 do return errSSLWouldBlock
+			if serr == .Connection_Closed || serr == .Not_Connected {
+				return errSSLClosedGraceful
+			}
 			return errSSLClosedAbort
 		}
 	}
-	dataLength^ = c.size_t(n)
-	if n < to_send {
-		return errSSLWouldBlock
-	}
+
+	dataLength^ = c.size_t(sent)
 	return noErr
 }
 
@@ -157,14 +183,28 @@ make_secure_transport :: proc(
 	// Disable cert validation for local test instances with self-signed certs
 	_ = sec_trans.SSLSetSessionOption(ctx, kSSLSessionOptionBreakOnServerAuth, true)
 
+	// Bounded like the read and write paths. The read callback reports a
+	// socket timeout as errSSLWouldBlock, so an unbounded loop here turns a
+	// peer that goes quiet mid-handshake into a permanent hang inside connect.
+	retries := 0
 	for {
 		status := sec_trans.SSLHandshake(ctx)
 		if status == noErr {
 			break
-		} else if status == errSSLWouldBlock {
+		}
+
+		retries += 1
+		if retries > TLS_MAX_WANT_RETRIES {
+			sec_trans.CFRelease(ctx)
+			return {}, pgerr.Net_Error{type = .Timeout}
+		}
+
+		if status == errSSLWouldBlock {
 			time.sleep(time.Millisecond)
 			continue
 		} else if status == errSSLServerAuthCompleted {
+			// Raised once because cert validation is broken out below;
+			// resuming completes the handshake.
 			continue
 		} else {
 			sec_trans.CFRelease(ctx)
@@ -189,6 +229,7 @@ sec_trans_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err:
 	if len(buf) == 0 do return 0, nil
 	processed: c.size_t = 0
 	retries := 0
+	start := time.now()
 	for {
 		status := sec_trans.SSLRead(data.secure_transport, raw_data(buf), c.size_t(len(buf)), &processed)
 		if processed > 0 {
@@ -197,6 +238,11 @@ sec_trans_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err:
 		if status == noErr {
 			return int(processed), nil
 		} else if status == errSSLWouldBlock {
+			// An expired socket receive deadline reaches here as would-block,
+			// so elapsed time, not the retry count, has to bound it.
+			if tls_deadline_exceeded(start, data.read_timeout) {
+				return 0, pgerr.Net_Error{type = .Timeout}
+			}
 			retries += 1
 			if retries > TLS_MAX_WANT_RETRIES {
 				return 0, pgerr.Net_Error{type = .Timeout}
@@ -215,16 +261,51 @@ sec_trans_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written
 	data := (^TLS_Transport_Data)(transport)
 	total := 0
 	retries := 0
-	for total < len(data_bytes) {
-		remaining := data_bytes[total:]
+	start := time.now()
+
+	// SSLWrite's "processed" count is what it encrypted into its own buffer,
+	// not what reached the socket. When it also reports errSSLWouldBlock those
+	// bytes are already committed, so handing them to SSLWrite again would put
+	// them on the wire twice. They are tracked here and drained by a
+	// zero-length SSLWrite, which flushes without queueing anything new.
+	pending := 0
+
+	for total < len(data_bytes) || pending > 0 {
 		processed: c.size_t = 0
-		status := sec_trans.SSLWrite(data.secure_transport, raw_data(remaining), c.size_t(len(remaining)), &processed)
-		if processed > 0 {
-			total += int(processed)
-			retries = 0
-			continue
+		status: c.int
+
+		if pending > 0 {
+			status = sec_trans.SSLWrite(data.secure_transport, nil, 0, &processed)
+			if status == noErr {
+				total += pending
+				pending = 0
+				retries = 0
+				continue
+			}
+		} else {
+			remaining := data_bytes[total:]
+			status = sec_trans.SSLWrite(data.secure_transport, raw_data(remaining), c.size_t(len(remaining)), &processed)
+			if status == noErr {
+				// SSLWrite reporting success without consuming anything would
+				// leave the loop state unchanged and spin at full tilt; treat
+				// it as the contract violation it is.
+				if processed == 0 {
+					return total, pgerr.Net_Error{type = .Send_Failed}
+				}
+				total += int(processed)
+				retries = 0
+				continue
+			}
+			if status == errSSLWouldBlock {
+				pending = int(processed)
+			}
 		}
+
 		if status == errSSLWouldBlock {
+			// See sec_trans_read: a send deadline surfaces as would-block.
+			if tls_deadline_exceeded(start, data.write_timeout) {
+				return total, pgerr.Net_Error{type = .Timeout}
+			}
 			retries += 1
 			if retries > TLS_MAX_WANT_RETRIES {
 				return total, pgerr.Net_Error{type = .Timeout}
@@ -254,5 +335,5 @@ sec_trans_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: 
 	data := (^TLS_Transport_Data)(transport)
 	data.read_timeout = read_timeout
 	data.write_timeout = write_timeout
-	return nil
+	return apply_socket_deadlines(data.socket, read_timeout, write_timeout)
 }

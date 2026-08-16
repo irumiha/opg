@@ -1,0 +1,7 @@
+# Shell scripts must keep LF endings even on Windows checkouts, where git's
+# default core.autocrlf=true would otherwise rewrite them to CRLF and break
+# bash parsing on the windows-latest runner.
+*.sh text eol=lf
+
+# The pg-init scripts run inside the Linux postgres container.
+scripts/pg-init/* text eol=lf

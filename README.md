@@ -543,7 +543,21 @@ scripts/integration-test.sh --all
 ```
 
 #### Option B: External or Native PostgreSQL Instance
-If `PGHOST` is set, test scripts and harnesses bypass Docker and connect directly to the specified PostgreSQL instance:
+If `PGHOST` or `PGPORT` is set, test scripts and harnesses bypass Docker and connect directly to the specified PostgreSQL instance. Every suite reads the same `PG*` variables, so a single run always targets one server.
+
+That server needs two things Docker Compose otherwise provides, or several tests will fail against an otherwise healthy database:
+
+1. **TLS enabled.** The `ssl_mode = .Require` tests and the `pg_stat_ssl` assertions need `ssl = on` in `postgresql.conf` with a certificate and key in place. A stock installation ships with SSL off and rejects the driver's `SSLRequest`.
+2. **Auth scenario roles.** The cleartext and MD5 authentication tests need the `opg_clear` and `opg_md5` roles, with `pg_hba.conf` rules forcing those specific methods. Provision them by running the setup script *on the database host* (it edits `pg_hba.conf` and reloads the server, so it needs filesystem access to the data directory):
+
+```bash
+PGHOST=127.0.0.1 PGPORT=5432 PGUSER=opg PGPASSWORD=opg PGDATABASE=opg_test \
+  bash scripts/ci-setup-postgres.sh
+```
+
+The script is safe to re-run: roles are refreshed in place and the `pg_hba.conf` edit is applied only once.
+
+With those in place, run the suite:
 
 ```bash
 PGHOST=127.0.0.1 PGPORT=5432 PGUSER=opg PGPASSWORD=opg PGDATABASE=opg_test \

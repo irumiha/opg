@@ -68,7 +68,51 @@ TLS_Transport_Data :: struct {
 	schannel_header:  u32,
 	schannel_trailer: u32,
 	schannel_max_msg: u32,
+	// Plaintext decrypted from a record but not yet handed to the caller.
 	schannel_buf:     [dynamic]byte,
+	// Ciphertext received from the socket but not yet decrypted: the tail of a
+	// partially received record, or whole records that arrived alongside the
+	// one just consumed.
+	schannel_enc:     [dynamic]byte,
+}
+
+/*
+	tls_retain_tail discards everything but the last keep bytes of buf,
+	preserving their order.
+
+	TLS record boundaries do not line up with TCP reads: one read can deliver a
+	complete record plus the beginning of the next, and the backends report that
+	remainder as a trailing byte count. Keeping it is what lets the following
+	read resume on a record boundary rather than mid-record.
+*/
+/*
+	tls_deadline_exceeded reports whether a retry loop has outlived the
+	timeout configured for it.
+
+	Every backend retries on "would block", which is also exactly what a socket
+	whose receive or send timeout expired reports. Counting retries alone
+	therefore multiplies the deadline: with a one second socket timeout, 5000
+	retries of a second each is well over an hour. Elapsed wall time is what
+	bounds a configured deadline; the retry counter remains as the backstop for
+	a socket with no deadline set.
+
+	A non-positive timeout means no deadline, matching Conn_Config's zero value.
+*/
+tls_deadline_exceeded :: proc(start: time.Time, timeout: time.Duration) -> bool {
+	if timeout <= 0 do return false
+	return time.since(start) >= timeout
+}
+
+tls_retain_tail :: proc(buf: ^[dynamic]byte, keep: int) {
+	if buf == nil do return
+	if keep <= 0 {
+		clear(buf)
+		return
+	}
+	if keep >= len(buf) do return
+
+	copy(buf[:keep], buf[len(buf) - keep:])
+	resize(buf, keep)
 }
 
 tls_mutex: sync.Mutex

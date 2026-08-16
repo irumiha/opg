@@ -951,4 +951,52 @@ when OPG_INTEGRATION {
 		}
 	}
 
+	@(test)
+	test_integration_read_timeout_is_enforced :: proc(t: ^testing.T) {
+		// Conn_Config's read_timeout has to reach the socket, not just be
+		// recorded on the transport. pg_sleep outlasts the deadline, so a
+		// working timeout is the only thing that can end this query.
+		cfg := integration_conn_config(t)
+		cfg.read_timeout = 250 * time.Millisecond
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected connect success, got %v", err)
+		if conn == nil {
+			return
+		}
+		defer integration_disconnect(conn)
+
+		start := time.now()
+		qerr := conn_query(conn, "SELECT pg_sleep(5);", nil, nil, nil, nil)
+		elapsed := time.since(start)
+
+		nerr, is_net := qerr.(pgerr.Net_Error)
+		testing.expectf(t, is_net, "expected a Net_Error from the read deadline, got %v", qerr)
+		testing.expect_value(t, nerr.type, pgerr.Net_Error_Type.Timeout)
+		testing.expectf(
+			t,
+			elapsed < 3 * time.Second,
+			"query ran %v against a 250ms read timeout; the deadline was not applied",
+			elapsed,
+		)
+	}
+
+	@(test)
+	test_integration_no_timeout_outlasts_slow_query :: proc(t: ^testing.T) {
+		// The complement: with no timeout configured (the zero value) a query
+		// slower than any default must still complete, so the deadline work
+		// cannot have introduced a spurious one.
+		cfg := integration_conn_config(t)
+
+		conn, err := conn_connect(cfg, context.allocator)
+		testing.expectf(t, err == nil, "expected connect success, got %v", err)
+		if conn == nil {
+			return
+		}
+		defer integration_disconnect(conn)
+
+		qerr := conn_query(conn, "SELECT pg_sleep(1);", nil, nil, nil, nil)
+		testing.expectf(t, qerr == nil, "expected the slow query to complete, got %v", qerr)
+	}
+
 } // when OPG_INTEGRATION

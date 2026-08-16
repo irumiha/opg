@@ -1,11 +1,8 @@
 package pgconn
 
-when ODIN_OS == .Windows {
-
 import "core:c"
 import "core:dynlib"
 import "core:net"
-import "core:slice"
 import "core:strings"
 import "core:time"
 import "../pgerr"
@@ -415,5 +412,3 @@ schannel_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: t
 	data.write_timeout = write_timeout
 	return nil
 }
-
-} // when ODIN_OS == .Windows

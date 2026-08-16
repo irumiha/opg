@@ -1,7 +1,5 @@
 package pgconn
 
-when ODIN_OS == .Darwin {
-
 import "core:c"
 import "core:dynlib"
 import "core:net"
@@ -19,14 +17,14 @@ SSLWriteFunc :: #type proc "c" (connection: rawptr, data: rawptr, dataLength: ^c
 SecureTransport_API :: struct {
 	__handle:             dynlib.Library,
 	SSLCreateContext:     proc "c" (alloc: rawptr, protocolSide: c.int, connectionType: c.int) -> rawptr,
-	SSLSetIOFuncs:        proc "c" (context: rawptr, readFunc: SSLReadFunc, writeFunc: SSLWriteFunc) -> c.int,
-	SSLSetConnection:     proc "c" (context: rawptr, connection: rawptr) -> c.int,
-	SSLSetPeerDomainName: proc "c" (context: rawptr, peerName: cstring, peerNameLen: c.size_t) -> c.int,
-	SSLSetSessionOption:  proc "c" (context: rawptr, option: c.int, value: bool) -> c.int,
-	SSLHandshake:         proc "c" (context: rawptr) -> c.int,
-	SSLRead:              proc "c" (context: rawptr, data: rawptr, dataLength: c.size_t, processed: ^c.size_t) -> c.int,
-	SSLWrite:             proc "c" (context: rawptr, data: rawptr, dataLength: c.size_t, processed: ^c.size_t) -> c.int,
-	SSLClose:             proc "c" (context: rawptr) -> c.int,
+	SSLSetIOFuncs:        proc "c" (ctx: rawptr, readFunc: SSLReadFunc, writeFunc: SSLWriteFunc) -> c.int,
+	SSLSetConnection:     proc "c" (ctx: rawptr, connection: rawptr) -> c.int,
+	SSLSetPeerDomainName: proc "c" (ctx: rawptr, peerName: cstring, peerNameLen: c.size_t) -> c.int,
+	SSLSetSessionOption:  proc "c" (ctx: rawptr, option: c.int, value: bool) -> c.int,
+	SSLHandshake:         proc "c" (ctx: rawptr) -> c.int,
+	SSLRead:              proc "c" (ctx: rawptr, data: rawptr, dataLength: c.size_t, processed: ^c.size_t) -> c.int,
+	SSLWrite:             proc "c" (ctx: rawptr, data: rawptr, dataLength: c.size_t, processed: ^c.size_t) -> c.int,
+	SSLClose:             proc "c" (ctx: rawptr) -> c.int,
 	CFRelease:            proc "c" (cf: rawptr),
 }
 
@@ -255,5 +253,3 @@ sec_trans_set_deadlines :: proc(transport: rawptr, read_timeout, write_timeout: 
 	data.write_timeout = write_timeout
 	return nil
 }
-
-} // when ODIN_OS == .Darwin

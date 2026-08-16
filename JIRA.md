@@ -457,7 +457,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 ---
 
 ### [OPG-501] GitHub Actions CI Matrix (Linux / macOS / Windows)
-- [ ] **Status**: Open
+- [x] **Status**: Done
 - **Layer**: Infrastructure
 - **Files**:
   - `.github/workflows/ci.yml`

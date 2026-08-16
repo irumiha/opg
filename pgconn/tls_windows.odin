@@ -76,8 +76,19 @@ SEC_E_OK                    :: 0x00000000
 SEC_I_CONTINUE_NEEDED       :: 0x00090312
 SEC_I_COMPLETE_NEEDED       :: 0x00090313
 SEC_I_COMPLETE_AND_CONTINUE :: 0x00090314
+SEC_I_CONTEXT_EXPIRED       :: 0x00090317 // Peer sent close_notify: clean EOF
 SEC_I_INCOMPLETE_CREDENTIALS:: 0x00090320
+SEC_I_RENEGOTIATE           :: 0x00090321
 SEC_E_INCOMPLETE_MESSAGE    :: i32(-2146893032) // 0x80090318
+
+// Ceiling on ciphertext buffered while assembling one handshake or record.
+// A TLS record caps at 16 KiB of payload plus expansion, but a handshake
+// message (a long certificate chain) may span several records and must be
+// held whole; 1 MiB is far above any real chain and still bounds a server
+// that never stops sending.
+SCHANNEL_MAX_BUFFER :: 1 << 20
+// Size of a single socket read. One max-size record fits without regrowing.
+SCHANNEL_READ_CHUNK :: 17 * 1024
 
 ISC_REQ_SEQUENCE_DETECT        :: 0x00000008
 ISC_REQ_REPLAY_DETECT          :: 0x00000004
@@ -118,10 +129,11 @@ Schannel_API :: struct {
 	EncryptMessage:             proc "stdcall" (phContext: ^CtxtHandle, fQOP: c.ulong, pMessage: ^SecBufferDesc, MessageSeqNo: c.ulong) -> c.long,
 	DecryptMessage:             proc "stdcall" (phContext: ^CtxtHandle, pMessage: ^SecBufferDesc, MessageSeqNo: c.ulong, pfQOP: ^c.ulong) -> c.long,
 	QueryContextAttributesA:    proc "stdcall" (phContext: ^CtxtHandle, ulAttribute: c.ulong, pBuffer: rawptr) -> c.long,
+	FreeContextBuffer:          proc "stdcall" (pvContextBuffer: rawptr) -> c.long,
 }
 
 schannel: Schannel_API
-SCHANNEL_SYMBOL_COUNT :: 7
+SCHANNEL_SYMBOL_COUNT :: 8
 
 schannel_probe :: proc() -> bool {
 	if schannel.__handle != nil && schannel.EncryptMessage != nil {
@@ -186,6 +198,7 @@ make_schannel_transport :: proc(
 	if out_buf.cbBuffer > 0 && out_buf.pvBuffer != nil {
 		token_bytes := ([^]byte)(out_buf.pvBuffer)[:out_buf.cbBuffer]
 		_, serr := net.send_tcp(socket, token_bytes)
+		schannel.FreeContextBuffer(out_buf.pvBuffer)
 		if serr != .None {
 			schannel.DeleteSecurityContext(&ctxt)
 			schannel.FreeCredentialsHandle(&cred)
@@ -193,25 +206,47 @@ make_schannel_transport :: proc(
 		}
 	}
 
-	recv_buf: [16384]byte
-	recv_len := 0
+	// Server tokens accumulate here. Whatever is still unconsumed when the
+	// handshake completes is the first application ciphertext, so the read
+	// path inherits this buffer rather than copying out of a local one.
+	data.schannel_enc = make([dynamic]byte, 0, SCHANNEL_READ_CHUNK, context.allocator)
 
-	for status == SEC_I_CONTINUE_NEEDED || status == SEC_I_COMPLETE_NEEDED || status == SEC_I_COMPLETE_AND_CONTINUE {
-		n, rerr := net.recv_tcp(socket, recv_buf[recv_len:])
-		if rerr != .None {
-			schannel.DeleteSecurityContext(&ctxt)
-			schannel.FreeCredentialsHandle(&cred)
-			return {}, map_recv_error(rerr)
+	handshake_failed :: proc(
+		data: ^TLS_Transport_Data,
+		ctxt: ^CtxtHandle,
+		cred: ^CredHandle,
+		err: pgerr.Error,
+	) -> pgerr.Error {
+		schannel.DeleteSecurityContext(ctxt)
+		schannel.FreeCredentialsHandle(cred)
+		delete(data.schannel_enc)
+		data.schannel_enc = nil
+		return err
+	}
+
+	need_more_data := true
+
+	for {
+		if need_more_data {
+			if len(data.schannel_enc) > SCHANNEL_MAX_BUFFER {
+				return {}, handshake_failed(data, &ctxt, &cred,
+					pgerr.Net_Error{type = .TLS_Handshake_Failed})
+			}
+
+			chunk: [SCHANNEL_READ_CHUNK]byte
+			n, rerr := net.recv_tcp(socket, chunk[:])
+			if rerr != .None {
+				return {}, handshake_failed(data, &ctxt, &cred, map_recv_error(rerr))
+			}
+			if n == 0 {
+				return {}, handshake_failed(data, &ctxt, &cred,
+					pgerr.Net_Error{type = .Socket_Closed})
+			}
+			append(&data.schannel_enc, ..chunk[:n])
 		}
-		if n == 0 {
-			schannel.DeleteSecurityContext(&ctxt)
-			schannel.FreeCredentialsHandle(&cred)
-			return {}, pgerr.Net_Error{type = .Socket_Closed}
-		}
-		recv_len += n
 
 		in_bufs: [2]SecBuffer
-		in_bufs[0] = SecBuffer{cbBuffer = c.ulong(recv_len), BufferType = SECBUFFER_TOKEN, pvBuffer = raw_data(recv_buf[:])}
+		in_bufs[0] = SecBuffer{cbBuffer = c.ulong(len(data.schannel_enc)), BufferType = SECBUFFER_TOKEN, pvBuffer = raw_data(data.schannel_enc[:])}
 		in_bufs[1] = SecBuffer{cbBuffer = 0, BufferType = SECBUFFER_EMPTY, pvBuffer = nil}
 		in_desc: SecBufferDesc = {ulVersion = SECBUFFER_VERSION, cBuffers = 2, pBuffers = &in_bufs[0]}
 
@@ -223,37 +258,45 @@ make_schannel_transport :: proc(
 			&in_desc, 0, &ctxt, &out_desc, &attrs, nil,
 		)
 
+		// A record split across TCP segments: keep what arrived and read the
+		// rest. This must not fall through to the status checks below, which
+		// would abandon a handshake that is merely incomplete.
 		if status == SEC_E_INCOMPLETE_MESSAGE {
-			continue // Need more bytes from server
+			need_more_data = true
+			continue
 		}
 
 		if out_buf.cbBuffer > 0 && out_buf.pvBuffer != nil {
 			token_bytes := ([^]byte)(out_buf.pvBuffer)[:out_buf.cbBuffer]
 			_, serr := net.send_tcp(socket, token_bytes)
+			// ISC_REQ_ALLOCATE_MEMORY makes each token Schannel's allocation.
+			schannel.FreeContextBuffer(out_buf.pvBuffer)
 			if serr != .None {
-				schannel.DeleteSecurityContext(&ctxt)
-				schannel.FreeCredentialsHandle(&cred)
-				return {}, map_send_error(serr)
+				return {}, handshake_failed(data, &ctxt, &cred, map_send_error(serr))
 			}
 		}
 
-		if status == SEC_E_OK {
-			// Handle any extra bytes left over from handshake
-			if in_bufs[1].BufferType == SECBUFFER_EXTRA && in_bufs[1].cbBuffer > 0 {
-				extra_start := recv_len - int(in_bufs[1].cbBuffer)
-				data.schannel_buf = make([dynamic]byte, 0, in_bufs[1].cbBuffer)
-				append(&data.schannel_buf, ..recv_buf[extra_start:recv_len])
-			}
-			break
+		if status != SEC_E_OK &&
+		   status != SEC_I_CONTINUE_NEEDED &&
+		   status != SEC_I_COMPLETE_NEEDED &&
+		   status != SEC_I_COMPLETE_AND_CONTINUE {
+			return {}, handshake_failed(data, &ctxt, &cred,
+				pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(status)})
 		}
 
-		if status != SEC_I_CONTINUE_NEEDED && status != SEC_I_COMPLETE_NEEDED && status != SEC_I_COMPLETE_AND_CONTINUE {
-			schannel.DeleteSecurityContext(&ctxt)
-			schannel.FreeCredentialsHandle(&cred)
-			return {}, pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(status)}
+		// Bytes past the end of the token Schannel consumed. On completion
+		// these are application data; mid-handshake they are the next token,
+		// already in hand, so another read would block waiting for bytes the
+		// server has finished sending.
+		extra := 0
+		if in_bufs[1].BufferType == SECBUFFER_EXTRA {
+			extra = int(in_bufs[1].cbBuffer)
 		}
+		tls_retain_tail(&data.schannel_enc, extra)
 
-		recv_len = 0
+		if status == SEC_E_OK do break
+
+		need_more_data = extra == 0
 	}
 
 	// Query stream sizes for framing
@@ -264,6 +307,11 @@ make_schannel_transport :: proc(
 		schannel.FreeCredentialsHandle(&cred)
 		return {}, pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(sz_ret)}
 	}
+
+	// Bound to the connection allocator here rather than on first append, so
+	// the buffer never inherits whatever short-lived allocator happens to be
+	// installed during a read.
+	data.schannel_buf = make([dynamic]byte, 0, 0, context.allocator)
 
 	data.backend = .Schannel
 	data.socket = socket
@@ -300,49 +348,79 @@ schannel_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: 
 	}
 
 	ctxt := CtxtHandle{dwLower = data.schannel_ctxt[0], dwUpper = data.schannel_ctxt[1]}
-	recv_buf: [32768]byte
-	recv_len := 0
 
 	for {
-		n, rerr := net.recv_tcp(data.socket, recv_buf[recv_len:])
-		if rerr != .None do return 0, map_recv_error(rerr)
-		if n == 0 do return 0, pgerr.Net_Error{type = .Socket_Closed}
-		recv_len += n
+		// Decrypt what is already held before going back to the socket. The
+		// buffer routinely carries a whole record left over from an earlier
+		// read, and reading first would block on a server with nothing more
+		// to send until we consume what it already sent.
+		if len(data.schannel_enc) > 0 {
+			bufs: [4]SecBuffer
+			bufs[0] = SecBuffer{cbBuffer = c.ulong(len(data.schannel_enc)), BufferType = SECBUFFER_DATA, pvBuffer = raw_data(data.schannel_enc[:])}
+			bufs[1] = SecBuffer{BufferType = SECBUFFER_EMPTY}
+			bufs[2] = SecBuffer{BufferType = SECBUFFER_EMPTY}
+			bufs[3] = SecBuffer{BufferType = SECBUFFER_EMPTY}
+			desc := SecBufferDesc{ulVersion = SECBUFFER_VERSION, cBuffers = 4, pBuffers = &bufs[0]}
 
-		bufs: [4]SecBuffer
-		bufs[0] = SecBuffer{cbBuffer = c.ulong(recv_len), BufferType = SECBUFFER_DATA, pvBuffer = raw_data(recv_buf[:])}
-		bufs[1] = SecBuffer{BufferType = SECBUFFER_EMPTY}
-		bufs[2] = SecBuffer{BufferType = SECBUFFER_EMPTY}
-		bufs[3] = SecBuffer{BufferType = SECBUFFER_EMPTY}
-		desc := SecBufferDesc{ulVersion = SECBUFFER_VERSION, cBuffers = 4, pBuffers = &bufs[0]}
+			status := schannel.DecryptMessage(&ctxt, &desc, 0, nil)
 
-		status := schannel.DecryptMessage(&ctxt, &desc, 0, nil)
-		if status == SEC_E_INCOMPLETE_MESSAGE {
-			continue
-		}
-		if status != SEC_E_OK {
-			return 0, pgerr.Net_Error{type = .Recv_Failed, code = i32(status)}
-		}
-
-		// Find decrypted data buffer
-		for i in 0 ..< 4 {
-			if bufs[i].BufferType == SECBUFFER_DATA && bufs[i].cbBuffer > 0 {
-				dec_bytes := ([^]byte)(bufs[i].pvBuffer)[:bufs[i].cbBuffer]
-				copied := min(len(buf), len(dec_bytes))
-				copy(buf[:copied], dec_bytes[:copied])
-
-				if copied < len(dec_bytes) {
-					if data.schannel_buf == nil {
-						data.schannel_buf = make([dynamic]byte, 0, len(dec_bytes) - copied)
+			switch status {
+			case SEC_E_OK:
+				// DecryptMessage rewrites in place, so both the plaintext and
+				// the leftover ciphertext point into schannel_enc. Copy the
+				// plaintext out before compacting, or compaction overwrites it.
+				extra := 0
+				copied := 0
+				for i in 0 ..< 4 {
+					switch bufs[i].BufferType {
+					case SECBUFFER_DATA:
+						if bufs[i].cbBuffer == 0 do continue
+						dec := ([^]byte)(bufs[i].pvBuffer)[:bufs[i].cbBuffer]
+						copied = min(len(buf), len(dec))
+						copy(buf[:copied], dec[:copied])
+						if copied < len(dec) {
+							append(&data.schannel_buf, ..dec[copied:])
+						}
+					case SECBUFFER_EXTRA:
+						extra = int(bufs[i].cbBuffer)
 					}
-					append(&data.schannel_buf, ..dec_bytes[copied:])
 				}
-				return copied, nil
+
+				tls_retain_tail(&data.schannel_enc, extra)
+
+				// A record carrying no application data (a session ticket, for
+				// instance) decrypts to nothing; keep going rather than
+				// reporting a zero-length read as end of stream.
+				if copied > 0 do return copied, nil
+				continue
+
+			case SEC_I_CONTEXT_EXPIRED:
+				// Peer sent close_notify. An orderly end of stream, not a fault.
+				clear(&data.schannel_enc)
+				return 0, pgerr.Net_Error{type = .Socket_Closed}
+
+			case SEC_I_RENEGOTIATE:
+				// Would need the handshake loop re-driven over this context;
+				// report it rather than treat the token as application data.
+				return 0, pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(status)}
+
+			case SEC_E_INCOMPLETE_MESSAGE:
+				// Partial record: fall through and read the remainder.
+
+			case:
+				return 0, pgerr.Net_Error{type = .Recv_Failed, code = i32(status)}
 			}
 		}
 
-		// Empty decrypted message; loop for more
-		recv_len = 0
+		if len(data.schannel_enc) > SCHANNEL_MAX_BUFFER {
+			return 0, pgerr.Net_Error{type = .Recv_Failed}
+		}
+
+		chunk: [SCHANNEL_READ_CHUNK]byte
+		n, rerr := net.recv_tcp(data.socket, chunk[:])
+		if rerr != .None do return 0, map_recv_error(rerr)
+		if n == 0 do return 0, pgerr.Net_Error{type = .Socket_Closed}
+		append(&data.schannel_enc, ..chunk[:n])
 	}
 }
 
@@ -402,6 +480,10 @@ schannel_close :: proc(transport: rawptr) {
 	if data.schannel_buf != nil {
 		delete(data.schannel_buf)
 		data.schannel_buf = nil
+	}
+	if data.schannel_enc != nil {
+		delete(data.schannel_enc)
+		data.schannel_enc = nil
 	}
 	net.close(data.socket)
 }

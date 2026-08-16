@@ -40,6 +40,7 @@ TLSEXT_NAMETYPE_host_name :: 0
 
 SSL_ERROR_WANT_READ :: 2
 SSL_ERROR_WANT_WRITE :: 3
+SSL_ERROR_SYSCALL :: 5
 SSL_ERROR_ZERO_RETURN :: 6
 
 // Upper bound on consecutive WANT_READ / WANT_WRITE retries. Each retry
@@ -147,6 +148,14 @@ openssl_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: p
 			continue
 		case SSL_ERROR_ZERO_RETURN:
 			return 0, pgerr.Net_Error{type = .Socket_Closed}
+		case SSL_ERROR_SYSCALL:
+			// ret == 0 means the peer vanished without sending close_notify —
+			// an abrupt disconnect, which the plaintext transport reports as
+			// Socket_Closed. Match it, so callers can recognize a dropped
+			// connection without special-casing the TLS path.
+			if ret == 0 {
+				return 0, pgerr.Net_Error{type = .Socket_Closed}
+			}
 		}
 		return 0, pgerr.Net_Error{type = .Recv_Failed, code = i32(code)}
 	}
@@ -173,7 +182,7 @@ openssl_write :: proc(transport: rawptr, data_bytes: []byte) -> (bytes_written: 
 			time.sleep(time.Millisecond)
 			continue
 		}
-		if code == SSL_ERROR_ZERO_RETURN {
+		if code == SSL_ERROR_ZERO_RETURN || (code == SSL_ERROR_SYSCALL && ret == 0) {
 			return total, pgerr.Net_Error{type = .Socket_Closed}
 		}
 		return total, pgerr.Net_Error{type = .Send_Failed, code = i32(code)}

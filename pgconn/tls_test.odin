@@ -186,3 +186,111 @@ test_tls_backend_injected_fallback_order :: proc(t: ^testing.T) {
 		testing.expect_value(t, openssl_result, TLS_Backend_Type.OpenSSL)
 	}
 }
+
+@(test)
+test_tls_backend_falls_back_when_native_unavailable :: proc(t: ^testing.T) {
+	// The per-OS priority lists put the native backend first and OpenSSL
+	// second. Injecting a native-first list on a host where that native
+	// backend cannot exist exercises the fallback leg specifically: selection
+	// must walk past the unavailable entry rather than giving up at it.
+	when ODIN_OS == .Linux {
+		schannel_first := tls_probe_backends([]TLS_Backend_Type{.Schannel, .OpenSSL})
+		testing.expect_value(t, schannel_first, TLS_Backend_Type.OpenSSL)
+
+		darwin_first := tls_probe_backends([]TLS_Backend_Type{.SecureTransport, .OpenSSL})
+		testing.expect_value(t, darwin_first, TLS_Backend_Type.OpenSSL)
+
+		// Every candidate unavailable resolves to None rather than picking
+		// something not asked for.
+		native_only := tls_probe_backends([]TLS_Backend_Type{.Schannel, .SecureTransport})
+		testing.expect_value(t, native_only, TLS_Backend_Type.None)
+	}
+}
+
+@(test)
+test_tls_backend_selection_respects_list_order :: proc(t: ^testing.T) {
+	// First usable candidate wins: a list led by an available backend must not
+	// be overtaken by a later one.
+	when ODIN_OS == .Linux {
+		result := tls_probe_backends([]TLS_Backend_Type{.OpenSSL, .Schannel})
+		testing.expect_value(t, result, TLS_Backend_Type.OpenSSL)
+	}
+}
+
+@(test)
+test_tls_default_backend_list_is_native_first :: proc(t: ^testing.T) {
+	// OPG-502 specifies the priority order per platform; assert the table
+	// rather than the probe result, which depends on what the host has.
+	when ODIN_OS == .Windows {
+		testing.expect_value(t, len(TLS_DEFAULT_BACKENDS), 2)
+		testing.expect_value(t, TLS_DEFAULT_BACKENDS[0], TLS_Backend_Type.Schannel)
+		testing.expect_value(t, TLS_DEFAULT_BACKENDS[1], TLS_Backend_Type.OpenSSL)
+	} else when ODIN_OS == .Darwin {
+		testing.expect_value(t, len(TLS_DEFAULT_BACKENDS), 2)
+		testing.expect_value(t, TLS_DEFAULT_BACKENDS[0], TLS_Backend_Type.SecureTransport)
+		testing.expect_value(t, TLS_DEFAULT_BACKENDS[1], TLS_Backend_Type.OpenSSL)
+	} else when ODIN_OS == .Linux {
+		testing.expect_value(t, len(TLS_DEFAULT_BACKENDS), 1)
+		testing.expect_value(t, TLS_DEFAULT_BACKENDS[0], TLS_Backend_Type.OpenSSL)
+	}
+}
+
+// ----------------------------------------------------------------------------
+// Record-buffer carry-over
+//
+// Both stream backends must keep ciphertext that arrived but has not been
+// consumed yet: TLS records do not align with TCP reads, so one read can
+// deliver a whole record plus the head of the next. Dropping that tail
+// desynchronizes the stream, which is why the compaction is tested directly.
+// ----------------------------------------------------------------------------
+
+@(test)
+test_tls_retain_tail_keeps_unconsumed_bytes :: proc(t: ^testing.T) {
+	buf := make([dynamic]byte, 0, 8)
+	defer delete(buf)
+	append(&buf, 1, 2, 3, 4, 5)
+
+	tls_retain_tail(&buf, 2)
+
+	testing.expect_value(t, len(buf), 2)
+	testing.expect_value(t, buf[0], byte(4))
+	testing.expect_value(t, buf[1], byte(5))
+}
+
+@(test)
+test_tls_retain_tail_zero_empties_buffer :: proc(t: ^testing.T) {
+	buf := make([dynamic]byte, 0, 8)
+	defer delete(buf)
+	append(&buf, 1, 2, 3)
+
+	tls_retain_tail(&buf, 0)
+
+	testing.expect_value(t, len(buf), 0)
+}
+
+@(test)
+test_tls_retain_tail_whole_buffer_is_unchanged :: proc(t: ^testing.T) {
+	buf := make([dynamic]byte, 0, 8)
+	defer delete(buf)
+	append(&buf, 7, 8, 9)
+
+	tls_retain_tail(&buf, 3)
+
+	testing.expect_value(t, len(buf), 3)
+	testing.expect_value(t, buf[0], byte(7))
+	testing.expect_value(t, buf[2], byte(9))
+}
+
+@(test)
+test_tls_retain_tail_clamps_oversized_request :: proc(t: ^testing.T) {
+	buf := make([dynamic]byte, 0, 8)
+	defer delete(buf)
+	append(&buf, 1, 2)
+
+	// A backend reporting more leftover than was supplied would otherwise
+	// index out of bounds; retaining everything is the safe reading.
+	tls_retain_tail(&buf, 99)
+
+	testing.expect_value(t, len(buf), 2)
+	testing.expect_value(t, buf[0], byte(1))
+}

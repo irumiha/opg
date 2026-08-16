@@ -1,33 +1,11 @@
 package opg
 
 @(require) import "core:testing"
-@(require) import "core:os"
-@(require) import "core:strconv"
-@(require) import "core:strings"
+@(require) import "pgconn"
 
 OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)
 
 when OPG_INTEGRATION {
-
-	get_integration_port :: proc() -> int {
-		if env_port := os.get_env("PGPORT", context.temp_allocator); env_port != "" {
-			if p, ok := strconv.parse_int(env_port); ok do return p
-		}
-		port_state, port_out, _, port_err := os.process_exec(
-			{command = {"docker", "compose", "port", "postgres", "5432"}},
-			context.temp_allocator,
-		)
-		if port_err == nil && port_state.success {
-			endpoint := strings.trim_space(string(port_out))
-			colon := strings.last_index_byte(endpoint, ':')
-			if colon >= 0 {
-				if parsed, ok := strconv.parse_int(endpoint[colon + 1:]); ok {
-					return parsed
-				}
-			}
-		}
-		return 5432
-	}
 
 	Test_Tx_Account :: struct {
 		id:      i32,
@@ -37,13 +15,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_transaction_commit_and_rollback :: proc(t: ^testing.T) {
-		cfg := Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := connect(cfg)
 		if cerr != nil {
@@ -95,13 +67,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_transaction_savepoints :: proc(t: ^testing.T) {
-		cfg := Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := connect(cfg)
 		if cerr != nil {

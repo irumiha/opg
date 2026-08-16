@@ -178,26 +178,6 @@ OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)
 
 when OPG_INTEGRATION {
 
-	get_integration_port :: proc() -> int {
-		if env_port := os.get_env("PGPORT", context.temp_allocator); env_port != "" {
-			if p, ok := strconv.parse_int(env_port); ok do return p
-		}
-		port_state, port_out, _, port_err := os.process_exec(
-			{command = {"docker", "compose", "port", "postgres", "5432"}},
-			context.temp_allocator,
-		)
-		if port_err == nil && port_state.success {
-			endpoint := strings.trim_space(string(port_out))
-			colon := strings.last_index_byte(endpoint, ':')
-			if colon >= 0 {
-				if parsed, ok := strconv.parse_int(endpoint[colon + 1:]); ok {
-					return parsed
-				}
-			}
-		}
-		return 5432
-	}
-
 	Item :: struct {
 		id:     i32,
 		name:   string,
@@ -207,13 +187,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_integration_query_struct_and_slice :: proc(t: ^testing.T) {
-		cfg := pgconn.Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := pgconn.conn_connect(cfg)
 		if cerr != nil {
@@ -267,13 +241,7 @@ when OPG_INTEGRATION {
 	// reused memory and all rows mapped to zero values with err == nil.
 	@(test)
 	test_integration_large_result_set_mapping :: proc(t: ^testing.T) {
-		cfg := pgconn.Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := pgconn.conn_connect(cfg)
 		if cerr != nil {
@@ -311,13 +279,7 @@ when OPG_INTEGRATION {
 	// hex-encoded and must round-trip through a bytea column exactly.
 	@(test)
 	test_integration_bytea_param_round_trip :: proc(t: ^testing.T) {
-		cfg := pgconn.Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := pgconn.conn_connect(cfg)
 		if cerr != nil {
@@ -354,13 +316,7 @@ when OPG_INTEGRATION {
 	// places by "%f" encoding; the bound value must round-trip bit-exactly.
 	@(test)
 	test_integration_f64_param_round_trip :: proc(t: ^testing.T) {
-		cfg := pgconn.Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := pgconn.conn_connect(cfg)
 		if cerr != nil {
@@ -386,13 +342,7 @@ when OPG_INTEGRATION {
 	// microsecond-precision value must now survive the round trip exactly.
 	@(test)
 	test_integration_timestamp_round_trip :: proc(t: ^testing.T) {
-		cfg := pgconn.Conn_Config{
-			host     = "127.0.0.1",
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
+		cfg := pgconn.integration_conn_config(t)
 
 		conn, cerr := pgconn.conn_connect(cfg)
 		if cerr != nil {

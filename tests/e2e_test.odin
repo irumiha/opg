@@ -18,48 +18,15 @@ OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)
 
 when OPG_INTEGRATION {
 
-	get_integration_port :: proc() -> int {
-		if env_port := os.get_env("PGPORT", context.temp_allocator); env_port != "" {
-			if p, ok := strconv.parse_int(env_port); ok do return p
-		}
-		port_state, port_out, _, port_err := os.process_exec(
-			{command = {"docker", "compose", "port", "postgres", "5432"}},
-			context.temp_allocator,
-		)
-		if port_err == nil && port_state.success {
-			endpoint := strings.trim_space(string(port_out))
-			colon := strings.last_index_byte(endpoint, ':')
-			if colon >= 0 {
-				if parsed, ok := strconv.parse_int(endpoint[colon + 1:]); ok {
-					return parsed
-				}
-			}
-		}
-		return 5432
-	}
-
-	get_test_conn_config :: proc() -> opg.Conn_Config {
-		host := "127.0.0.1"
-		if env_host := os.get_env("PGHOST", context.temp_allocator); env_host != "" {
-			host = env_host
-		}
-		cfg := opg.Conn_Config{
-			host     = host,
-			port     = get_integration_port(),
-			user     = "opg",
-			password = "opg",
-			database = "opg_test",
-		}
-		if v := os.get_env("PGUSER", context.temp_allocator); v != "" {
-			cfg.user = v
-		}
-		if v := os.get_env("PGPASSWORD", context.temp_allocator); v != "" {
-			cfg.password = v
-		}
-		if v := os.get_env("PGDATABASE", context.temp_allocator); v != "" {
-			cfg.database = v
-		}
-		return cfg
+	/*
+		get_test_conn_config resolves the integration endpoint through the
+		pgconn harness, so every suite in a run targets the same server:
+		compose defaults, overridden by PG* environment variables. Keeping the
+		resolution in one place is what stops PGHOST from being honored by some
+		suites and ignored by others.
+	*/
+	get_test_conn_config :: proc(t: ^testing.T) -> opg.Conn_Config {
+		return pgconn.integration_conn_config(t)
 	}
 
 	// ------------------------------------------------------------------------
@@ -100,7 +67,7 @@ when OPG_INTEGRATION {
 	@(test)
 	test_e2e_high_concurrency_pool_stress :: proc(t: ^testing.T) {
 		pool_cfg := opg.Pool_Config{
-			conn_config     = get_test_conn_config(),
+			conn_config     = get_test_conn_config(t),
 			min_conns       = 2,
 			max_conns       = 8,
 			acquire_timeout = time.Second * 10,
@@ -157,7 +124,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_e2e_large_dataset_streaming :: proc(t: ^testing.T) {
-		conn, cerr := opg.connect(get_test_conn_config(), context.allocator)
+		conn, cerr := opg.connect(get_test_conn_config(t), context.allocator)
 		testing.expect(t, cerr == nil, "connect failed")
 		if cerr != nil do return
 		defer opg.disconnect(conn)
@@ -181,7 +148,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_e2e_sqlstate_syntax_error :: proc(t: ^testing.T) {
-		conn, cerr := opg.connect(get_test_conn_config(), context.allocator)
+		conn, cerr := opg.connect(get_test_conn_config(t), context.allocator)
 		testing.expect(t, cerr == nil, "connect failed")
 		if cerr != nil do return
 		defer opg.disconnect(conn)
@@ -212,7 +179,7 @@ when OPG_INTEGRATION {
 
 	@(test)
 	test_e2e_query_cancellation :: proc(t: ^testing.T) {
-		conn, cerr := opg.connect(get_test_conn_config(), context.allocator)
+		conn, cerr := opg.connect(get_test_conn_config(t), context.allocator)
 		testing.expect(t, cerr == nil, "connect failed")
 		if cerr != nil do return
 		defer opg.disconnect(conn)

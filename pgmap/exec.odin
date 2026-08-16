@@ -391,6 +391,11 @@ query_slice :: proc(
 /*
 	exec executes a SQL command (e.g. INSERT, UPDATE, DELETE, DDL) with parameter arguments
 	and returns the count of rows affected.
+
+	ERROR OWNERSHIP: a returned Postgres_Error is cloned into `conn.allocator`
+	and belongs to the caller; free it with `pgerr.postgres_error_destroy`.
+	This is unrelated to the `allocator` parameter on the query procs above,
+	which governs row data.
 */
 exec :: proc(
 	conn: ^pgconn.Conn,

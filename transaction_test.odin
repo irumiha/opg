@@ -199,6 +199,9 @@ when OPG_INTEGRATION {
 		// reported to the caller as a successful commit.
 		_, dup_err := tx_exec(&tx, "INSERT INTO test_abort (id) VALUES (1);")
 		testing.expect(t, dup_err != nil, "expected a duplicate key error")
+		if pg, is_pg := dup_err.(Postgres_Error); is_pg {
+			postgres_error_destroy(pg, context.allocator)
+		}
 		testing.expect_value(t, conn.transaction_status, pgproto.Transaction_Status.Failed_Transaction)
 
 		commit_err := tx_commit(&tx)

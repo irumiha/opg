@@ -223,6 +223,18 @@ conn_connect_with_transport :: proc(
 	return conn_handshake(c, config, transport, allocator)
 }
 
+/*
+	conn_connect dials the server, negotiates TLS per config.ssl_mode, and runs
+	the startup and authentication exchange.
+
+	ERROR OWNERSHIP:
+	A Postgres_Error from the server (a rejected login, an unknown database) is
+	cloned into `allocator` and belongs to the caller; free it with
+	`pgerr.postgres_error_destroy(err.(pgerr.Postgres_Error), allocator)`.
+	There is no Conn to read the allocator back from on this path, which is the
+	one thing that distinguishes it from the execution paths — the rule itself
+	is the same everywhere.
+*/
 conn_connect :: proc(
 	config: Conn_Config,
 	allocator := context.allocator,

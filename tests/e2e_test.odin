@@ -201,6 +201,9 @@ when OPG_INTEGRATION {
 		testing.expect(t, is_pg, "expected Postgres_Error")
 		testing.expect_value(t, pg_err.severity, "ERROR")
 		testing.expect_value(t, pg_err.code, "42601") // syntax_error
+		if is_pg {
+			opg.postgres_error_destroy(pg_err, conn.allocator)
+		}
 	}
 
 	// ------------------------------------------------------------------------
@@ -210,9 +213,9 @@ when OPG_INTEGRATION {
 	Cancel_Task :: struct {
 		conn:         ^opg.Conn,
 		err_occurred: bool,
-		// SQLSTATE is always five characters, so it is captured inline. An
-		// allocated copy would be owned by this worker's allocator and freed
-		// by the test's, which are not the same one.
+		// SQLSTATE is always five characters, so it is captured inline rather
+		// than cloned: the value has to cross back to the test thread, and an
+		// inline copy needs no agreement about allocators to get there.
 		sqlstate:     [5]byte,
 	}
 
@@ -222,10 +225,12 @@ when OPG_INTEGRATION {
 		if err != nil {
 			task.err_occurred = true
 			if pg_err, is_pg := err.(opg.Postgres_Error); is_pg {
-				// Errors raised during execution are cloned into the temp
-				// allocator (unlike connect errors, which the caller owns), so
-				// the code is copied out here and the original is not freed.
 				copy(task.sqlstate[:], pg_err.code)
+				// Every Postgres_Error the driver returns comes from the
+				// connection's allocator, which is the same allocator on any
+				// thread. That is what lets this worker free an error raised on
+				// a connection the test thread opened.
+				opg.postgres_error_destroy(pg_err, task.conn.allocator)
 			}
 		}
 	}

@@ -15,11 +15,13 @@ Prepared_Statement :: struct {
 	conn_exec_params executes an ad-hoc parameterized query using unnamed statement ("")
 	and unnamed portal ("") via a single pipelined write: Parse + Bind + Describe + Execute + Sync.
 
-	MEMORY LIFETIME:
+	ERROR OWNERSHIP:
 	If the server returns a Postgres_Error, its string fields are cloned into
-	`context.temp_allocator` to survive the execution loop. Callers wishing
-	to retain the error beyond the current frame/temp-arena cycle must clone it
-	using `pgerr.postgres_error_clone(err.(pgerr.Postgres_Error), allocator)`.
+	`conn.allocator` and belong to the caller. Free them with
+	`pgerr.postgres_error_destroy(err.(pgerr.Postgres_Error), conn.allocator)`.
+
+	Every Postgres_Error this driver returns follows that one rule, connect
+	included, so teardown never depends on which call produced the value.
 */
 conn_exec_params :: proc(
 	conn: ^Conn,
@@ -96,7 +98,7 @@ conn_exec_params :: proc(
 
 		case pgproto.Msg_Error_Response:
 			if var_recorded_err == nil {
-				cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+				cloned_err, _ := pgerr.postgres_error_clone(m.error, conn.allocator)
 				var_recorded_err = cloned_err
 			}
 
@@ -125,6 +127,9 @@ conn_exec_params :: proc(
 /*
 	conn_prepare prepares a named SQL statement with optional parameter OIDs.
 	Caches the prepared statement in conn.prepared_statements upon success.
+
+	ERROR OWNERSHIP: a returned Postgres_Error is cloned into `conn.allocator`
+	and belongs to the caller; free it with `pgerr.postgres_error_destroy`.
 */
 conn_prepare :: proc(
 	conn: ^Conn,
@@ -192,7 +197,7 @@ conn_prepare :: proc(
 
 		case pgproto.Msg_Error_Response:
 			if var_recorded_err == nil {
-				cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+				cloned_err, _ := pgerr.postgres_error_clone(m.error, conn.allocator)
 				var_recorded_err = cloned_err
 			}
 
@@ -247,6 +252,9 @@ conn_prepare :: proc(
 /*
 	conn_exec_prepared executes a previously prepared named statement.
 	Binds parameters, describes the portal, executes, and syncs.
+
+	ERROR OWNERSHIP: a returned Postgres_Error is cloned into `conn.allocator`
+	and belongs to the caller; free it with `pgerr.postgres_error_destroy`.
 */
 conn_exec_prepared :: proc(
 	conn: ^Conn,
@@ -322,7 +330,7 @@ conn_exec_prepared :: proc(
 
 		case pgproto.Msg_Error_Response:
 			if var_recorded_err == nil {
-				cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+				cloned_err, _ := pgerr.postgres_error_clone(m.error, conn.allocator)
 				var_recorded_err = cloned_err
 			}
 
@@ -350,6 +358,9 @@ conn_exec_prepared :: proc(
 
 /*
 	conn_close_statement closes a named prepared statement on the server and removes it from cache.
+
+	ERROR OWNERSHIP: a returned Postgres_Error is cloned into `conn.allocator`
+	and belongs to the caller; free it with `pgerr.postgres_error_destroy`.
 */
 conn_close_statement :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 	if !conn_is_alive(conn) {
@@ -392,7 +403,7 @@ conn_close_statement :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 
 		case pgproto.Msg_Error_Response:
 			if var_recorded_err == nil {
-				cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+				cloned_err, _ := pgerr.postgres_error_clone(m.error, conn.allocator)
 				var_recorded_err = cloned_err
 			}
 
@@ -431,6 +442,9 @@ conn_close_statement :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 
 /*
 	conn_close_portal closes a named portal on the server.
+
+	ERROR OWNERSHIP: a returned Postgres_Error is cloned into `conn.allocator`
+	and belongs to the caller; free it with `pgerr.postgres_error_destroy`.
 */
 conn_close_portal :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 	if !conn_is_alive(conn) {
@@ -473,7 +487,7 @@ conn_close_portal :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 
 		case pgproto.Msg_Error_Response:
 			if var_recorded_err == nil {
-				cloned_err, _ := pgerr.postgres_error_clone(m.error, context.temp_allocator)
+				cloned_err, _ := pgerr.postgres_error_clone(m.error, conn.allocator)
 				var_recorded_err = cloned_err
 			}
 

@@ -391,9 +391,10 @@ schannel_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: 
 
 				tls_retain_tail(&data.schannel_enc, extra)
 
-				// A record carrying no application data (a session ticket, for
-				// instance) decrypts to nothing; keep going rather than
-				// reporting a zero-length read as end of stream.
+				// A record carrying no application data decrypts to nothing;
+				// keep going rather than reporting a zero-length read as end
+				// of stream. (Under TLS 1.3 Schannel reports post-handshake
+				// messages as SEC_I_RENEGOTIATE instead — see below.)
 				if copied > 0 do return copied, nil
 				// Unless nothing was consumed either — re-decrypting the same
 				// bytes would spin, so read more instead.
@@ -405,8 +406,20 @@ schannel_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: 
 				return 0, pgerr.Net_Error{type = .Socket_Closed}
 
 			case SEC_I_RENEGOTIATE:
-				// Would need the handshake loop re-driven over this context;
-				// report it rather than treat the token as application data.
+				// KNOWN LIMITATION, and the most likely reason Windows TLS
+				// fails against a modern server: Schannel reports TLS 1.3
+				// post-handshake messages this way, and PostgreSQL built on
+				// OpenSSL 1.1.1+ sends a NewSessionTicket right after the
+				// handshake — so this can fire on the very first read.
+				//
+				// Handling it means re-driving InitializeSecurityContext (with
+				// no input buffer first, per SSPI) over the bytes still in
+				// schannel_enc, then resuming. Deliberately not compacting the
+				// buffer here leaves those bytes intact for that fix.
+				//
+				// Reporting it is still better than the alternative: treating
+				// a handshake token as application data corrupts the stream
+				// silently, whereas this fails loudly with the status code.
 				return 0, pgerr.Net_Error{type = .TLS_Handshake_Failed, code = i32(status)}
 
 			case SEC_E_INCOMPLETE_MESSAGE:

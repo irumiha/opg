@@ -24,6 +24,7 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:os"
 import "core:strconv"
+import "core:strings"
 import "core:thread"
 import "core:time"
 import opg "../.."
@@ -53,7 +54,7 @@ worker_proc :: proc(t: ^thread.Thread) {
 		intrinsics.atomic_store(&w.stage, i32(Stage.Connecting))
 		conn, cerr := opg.connect(w.config, context.allocator)
 		if cerr != nil {
-			w.failure = fmt.aprintf("connect: %v", cerr)
+			w.failure = fmt.aprintf("connect: %s", describe_error(cerr))
 			intrinsics.atomic_store(&w.stage, i32(Stage.Failed))
 			return
 		}
@@ -64,7 +65,7 @@ worker_proc :: proc(t: ^thread.Thread) {
 		}
 		row, qerr := opg.query_struct(conn, Row, "SELECT $1::int AS val;", i32(i))
 		if qerr != nil || row.val != i32(i) {
-			w.failure = fmt.aprintf("query: %v (val=%d want=%d)", qerr, row.val, i)
+			w.failure = fmt.aprintf("query: %s (val=%d want=%d)", describe_error(qerr), row.val, i)
 			opg.disconnect(conn)
 			intrinsics.atomic_store(&w.stage, i32(Stage.Failed))
 			return
@@ -83,6 +84,48 @@ env_or :: proc(name, fallback: string) -> string {
 	return fallback
 }
 
+/*
+	resolve_port mirrors the integration harness: PGPORT wins, otherwise ask
+	docker for the compose service's mapped port. docker-compose.yml binds an
+	ephemeral host port, so assuming 5432 lands on whatever other PostgreSQL
+	the machine happens to run — which shows up as an authentication failure
+	against an unrelated server rather than anything to do with this driver.
+*/
+resolve_port :: proc() -> int {
+	if v := os.get_env("PGPORT", context.allocator); v != "" {
+		if p, ok := strconv.parse_int(v); ok do return p
+	}
+	// An explicit host means an external server; do not consult docker.
+	if os.get_env("PGHOST", context.allocator) != "" do return 5432
+
+	state, out, _, err := os.process_exec(
+		{command = {"docker", "compose", "port", "postgres", "5432"}},
+		context.allocator,
+	)
+	if err == nil && state.success {
+		endpoint := strings.trim_space(string(out))
+		if colon := strings.last_index_byte(endpoint, ':'); colon >= 0 {
+			if p, ok := strconv.parse_int(endpoint[colon + 1:]); ok {
+				return p
+			}
+		}
+	}
+	return 5432
+}
+
+/*
+	describe_error keeps the heartbeat readable. A server-side failure repeated
+	across every worker is one fact, not thirty-two.
+*/
+describe_error :: proc(err: opg.Error) -> string {
+	if pg_err, is_pg := err.(opg.Postgres_Error); is_pg {
+		msg := fmt.aprintf("%s %s: %s", pg_err.severity, pg_err.code, pg_err.message)
+		opg.postgres_error_destroy(pg_err, context.allocator)
+		return msg
+	}
+	return fmt.aprintf("%v", err)
+}
+
 main :: proc() {
 	threads_n := 32
 	iterations := 20
@@ -90,8 +133,7 @@ main :: proc() {
 	if len(args) > 0 do threads_n, _ = strconv.parse_int(args[0])
 	if len(args) > 1 do iterations, _ = strconv.parse_int(args[1])
 
-	port := 5432
-	if p, ok := strconv.parse_int(env_or("PGPORT", "5432")); ok do port = p
+	port := resolve_port()
 
 	config := opg.Conn_Config {
 		host             = env_or("PGHOST", "127.0.0.1"),
@@ -166,12 +208,16 @@ main :: proc() {
 	}
 
 	failures := 0
+	tally := make(map[string]int)
 	for i in 0 ..< threads_n {
 		thread.join(threads[i])
 		if workers[i].failure != "" {
-			fmt.printfln("  worker %d failed: %s", i, workers[i].failure)
+			tally[workers[i].failure] += 1
 			failures += 1
 		}
+	}
+	for msg, count in tally {
+		fmt.printfln("  %d workers failed: %s", count, msg)
 	}
 	fmt.printfln("tls-stress: finished in %.1fs with %d failed workers", time.duration_seconds(time.since(start)), failures)
 	if failures > 0 do os.exit(1)

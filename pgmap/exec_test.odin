@@ -1,9 +1,6 @@
 package pgmap
 
 import "core:mem"
-@(require) import "core:os"
-@(require) import "core:strconv"
-@(require) import "core:strings"
 import "core:testing"
 @(require) import "core:time"
 @(require) import "../pgconn"

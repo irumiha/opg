@@ -1,18 +1,13 @@
 package tests
 
 @(require) import "core:mem"
-@(require) import "core:os"
 @(require) import "core:strconv"
 @(require) import "core:strings"
-@(require) import "core:sync"
 @(require) import "core:testing"
 @(require) import "core:thread"
 @(require) import "core:time"
 @(require) import ".."
 @(require) import "../pgconn"
-@(require) import "../pgerr"
-@(require) import "../pgmap"
-@(require) import "../pgproto"
 
 OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)
 

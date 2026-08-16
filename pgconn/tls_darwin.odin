@@ -25,6 +25,10 @@ SecureTransport_API :: struct {
 	SSLHandshake:         proc "c" (ctx: rawptr) -> c.int,
 	SSLRead:              proc "c" (ctx: rawptr, data: rawptr, dataLength: c.size_t, processed: ^c.size_t) -> c.int,
 	SSLWrite:             proc "c" (ctx: rawptr, data: rawptr, dataLength: c.size_t, processed: ^c.size_t) -> c.int,
+	// Bytes already decrypted and waiting in the context. Reading these cannot
+	// touch the socket, which is what lets sec_trans_read return everything
+	// available without asking SSLRead to fill the caller's buffer.
+	SSLGetBufferedReadSize: proc "c" (ctx: rawptr, bufSize: ^c.size_t) -> c.int,
 	SSLClose:             proc "c" (ctx: rawptr) -> c.int,
 	CFRelease:            proc "c" (cf: rawptr),
 }
@@ -40,7 +44,7 @@ errSSLServerAuthCompleted  :: -9841
 noErr                      :: 0
 
 sec_trans: SecureTransport_API
-SEC_TRANS_SYMBOL_COUNT :: 10
+SEC_TRANS_SYMBOL_COUNT :: 11
 
 secure_transport_probe :: proc() -> bool {
 	if sec_trans.__handle != nil && sec_trans.SSLRead != nil {
@@ -224,16 +228,59 @@ make_secure_transport :: proc(
 	}, nil
 }
 
+/*
+	sec_trans_buffered drains bytes SecureTransport has already decrypted into
+	dst, without touching the socket. Returns how many were moved.
+*/
+@(private = "file")
+sec_trans_buffered :: proc(ctx: rawptr, dst: []byte) -> int {
+	if len(dst) == 0 do return 0
+
+	available: c.size_t = 0
+	if sec_trans.SSLGetBufferedReadSize(ctx, &available) != noErr do return 0
+	if available == 0 do return 0
+
+	want := min(int(available), len(dst))
+	processed: c.size_t = 0
+	// Only ever asks for bytes already decrypted, so this cannot reach the
+	// read callback and cannot block.
+	sec_trans.SSLRead(ctx, raw_data(dst), c.size_t(want), &processed)
+	return int(processed)
+}
+
+/*
+	sec_trans_read implements the Stream_Transport contract: block until at
+	least one byte is available, then return everything ready, up to len(buf).
+
+	SSLRead fills the length it is given, calling the read callback repeatedly
+	until it has that many bytes. The callback reads a blocking socket, so
+	passing len(buf) — which the stream layer sizes as "the whole unused tail of
+	my buffer", far larger than any response — deadlocks the moment the server
+	has answered and is waiting for the next query: SSLRead wants more, the
+	server sends nothing, recv never returns. OpenSSL's SSL_read returns after
+	a single record, which is why only macOS hung.
+
+	So: ask for exactly one byte (the blocking part callers expect), then drain
+	whatever else SecureTransport already holds.
+*/
 sec_trans_read :: proc(transport: rawptr, buf: []byte) -> (bytes_read: int, err: pgerr.Error) {
 	data := (^TLS_Transport_Data)(transport)
 	if len(buf) == 0 do return 0, nil
+
+	// Anything already decrypted satisfies the read outright.
+	if n := sec_trans_buffered(data.secure_transport, buf); n > 0 {
+		return n, nil
+	}
+
 	processed: c.size_t = 0
 	retries := 0
 	start := time.now()
 	for {
-		status := sec_trans.SSLRead(data.secure_transport, raw_data(buf), c.size_t(len(buf)), &processed)
+		status := sec_trans.SSLRead(data.secure_transport, raw_data(buf), 1, &processed)
 		if processed > 0 {
-			return int(processed), nil
+			total := int(processed)
+			total += sec_trans_buffered(data.secure_transport, buf[total:])
+			return total, nil
 		}
 		if status == noErr {
 			return int(processed), nil

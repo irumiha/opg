@@ -1,13 +1,39 @@
 package opg
 
+/*
+	opg – Database Transactions & Savepoints API
+
+	Provides ACID transaction lifecycle management over PostgreSQL connections,
+	including configurable transaction isolation levels, read-only/read-write
+	access modes, deferrable serializable transactions, and nested savepoints.
+
+	Standard Usage Pattern:
+	  tx, err := opg.begin_transaction(conn)
+	  if err != nil do return err
+	  defer opg.tx_rollback(&tx) // Safe & idempotent: no-op if committed
+
+	  opg.tx_exec(&tx, "INSERT INTO accounts (id, balance) VALUES ($1, $2);", 1, 100) or_return
+	  opg.tx_exec(&tx, "INSERT INTO audit_log (action) VALUES ($1);", "account_created") or_return
+
+	  return opg.tx_commit(&tx)
+*/
+
 import "base:intrinsics"
 import "core:fmt"
 import "pgorm"
 
 // ============================================================================
-// High-Level Database Transactions API
+// 1. Transaction Options & Modes
 // ============================================================================
 
+/*
+	Isolation_Level controls the transaction isolation level in PostgreSQL:
+	  - Default: Uses server-default isolation level (typically Read Committed).
+	  - Read_Committed: Statements see data committed before the statement began.
+	  - Repeatable_Read: All statements in the current transaction see a snapshot
+	                     as of the first query in the transaction.
+	  - Serializable: Strict serializable execution simulating sequential transactions.
+*/
 Isolation_Level :: enum {
 	Default,
 	Read_Committed,
@@ -15,25 +41,58 @@ Isolation_Level :: enum {
 	Serializable,
 }
 
+/*
+	Tx_Access_Mode specifies whether the transaction allows write operations:
+	  - Read_Write: Allows INSERT, UPDATE, DELETE, and DDL operations. (Default)
+	  - Read_Only: Disallows non-temporary table modifications.
+*/
 Tx_Access_Mode :: enum {
 	Read_Write,
 	Read_Only,
 }
 
+/*
+	Tx_Options configures isolation level, access mode, and deferrable attributes
+	for a new transaction.
+*/
 Tx_Options :: struct {
 	isolation:  Isolation_Level,
 	access:     Tx_Access_Mode,
 	deferrable: bool,
 }
 
+/*
+	Tx is a handle representing an active database transaction.
+	Guarantees idempotency: multiple calls to commit or rollback after
+	completion are safe no-ops.
+*/
 Tx :: struct {
 	conn:        ^Conn,
 	committed:   bool,
 	rolled_back: bool,
 }
 
+// ============================================================================
+// 2. Transaction Lifecycle
+// ============================================================================
+
 /*
-	begin_transaction begins a transaction on the connection with the given options.
+	begin_transaction begins a new transaction on the given connection with the
+	specified options (or default READ WRITE isolation).
+
+	Parameters:
+	  - conn: Active database connection.
+	  - options: Transaction options (isolation level, access mode, deferrable).
+	  - allocator: Allocator used for temporary query formatting.
+
+	Returns:
+	  - An active Tx handle, or an Error on failure.
+
+	Example:
+	  tx, err := opg.begin_transaction(conn, {
+	      isolation = .Serializable,
+	      access    = .Read_Write,
+	  })
 */
 begin_transaction :: proc(
 	conn: ^Conn,
@@ -73,7 +132,12 @@ begin_transaction :: proc(
 }
 
 /*
-	tx_commit commits the active transaction.
+	tx_commit commits all changes made within the active transaction to the database.
+	Marks the transaction as committed. Calling tx_commit on an already finished
+	transaction is a safe no-op.
+
+	Returns:
+	  - Error if the COMMIT command fails on the server.
 */
 tx_commit :: proc(tx: ^Tx) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
@@ -87,7 +151,10 @@ tx_commit :: proc(tx: ^Tx) -> Error {
 }
 
 /*
-	tx_rollback rolls back the transaction. Safe to call multiple times or via defer.
+	tx_rollback rolls back and aborts all changes made within the transaction.
+	Marks the transaction as rolled back. Designed to be safely called inside
+	a `defer opg.tx_rollback(&tx)` block; if the transaction was already committed,
+	this is an immediate no-op.
 */
 tx_rollback :: proc(tx: ^Tx) -> Error {
 	if tx == nil || tx.conn == nil do return nil
@@ -98,8 +165,18 @@ tx_rollback :: proc(tx: ^Tx) -> Error {
 	return err
 }
 
+// ============================================================================
+// 3. Savepoint Management
+// ============================================================================
+
 /*
-	tx_savepoint creates a savepoint inside the transaction.
+	tx_savepoint establishes a new named savepoint within the active transaction.
+	Savepoints allow partial rollbacks of operations executed after the savepoint
+	without rolling back the entire transaction.
+
+	Parameters:
+	  - tx: Active transaction handle.
+	  - name: Identifier name for the savepoint.
 */
 tx_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
@@ -110,7 +187,12 @@ tx_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 }
 
 /*
-	tx_rollback_to_savepoint rolls back to a named savepoint.
+	tx_rollback_to_savepoint rolls back all statements executed after the specified
+	savepoint was established, keeping the surrounding transaction alive.
+
+	Parameters:
+	  - tx: Active transaction handle.
+	  - name: Identifier name of the savepoint to roll back to.
 */
 tx_rollback_to_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
@@ -121,7 +203,13 @@ tx_rollback_to_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 }
 
 /*
-	tx_release_savepoint destroys a named savepoint.
+	tx_release_savepoint destroys a previously established savepoint within the
+	active transaction, making rollback to that savepoint impossible while preserving
+	the changes made before or after it.
+
+	Parameters:
+	  - tx: Active transaction handle.
+	  - name: Identifier name of the savepoint to release.
 */
 tx_release_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
@@ -131,8 +219,20 @@ tx_release_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	return err
 }
 
+// ============================================================================
+// 4. Transactional Query Execution
+// ============================================================================
+
 /*
-	tx_query_struct executes a query inside the transaction and maps the first row to struct T.
+	tx_query_struct executes a parameterized query within the transaction and maps
+	the first returned row directly into an Odin struct of type T.
+
+	Parameters:
+	  - tx: Active transaction handle.
+	  - $T: Target Odin struct typeid.
+	  - sql: Parameterized SQL query ($1, $2, ...).
+	  - args: Variadic bind parameters.
+	  - allocator: Allocator for string/slice fields inside T (default context.temp_allocator).
 */
 tx_query_struct :: proc(
 	tx: ^Tx,
@@ -149,7 +249,15 @@ tx_query_struct :: proc(
 }
 
 /*
-	tx_query_slice executes a query inside the transaction and maps all rows to []T.
+	tx_query_slice executes a parameterized query within the transaction and maps
+	all returned rows into a newly allocated slice of Odin structs ([]T).
+
+	Parameters:
+	  - tx: Active transaction handle.
+	  - $T: Target Odin struct typeid.
+	  - sql: Parameterized SQL query ($1, $2, ...).
+	  - args: Variadic bind parameters.
+	  - allocator: Allocator for the returned slice and row fields (default context.temp_allocator).
 */
 tx_query_slice :: proc(
 	tx: ^Tx,
@@ -166,7 +274,13 @@ tx_query_slice :: proc(
 }
 
 /*
-	tx_exec executes a command inside the transaction.
+	tx_exec executes a parameterized SQL command (e.g. INSERT, UPDATE, DELETE)
+	within the active transaction and returns the count of rows affected.
+
+	Parameters:
+	  - tx: Active transaction handle.
+	  - sql: Parameterized SQL command ($1, $2, ...).
+	  - args: Variadic bind parameters.
 */
 tx_exec :: proc(
 	tx: ^Tx,

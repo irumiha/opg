@@ -15,7 +15,10 @@ package tls_stress
 
 	Usage, from the repository root:
 
-	    odin run tools/tls-stress -- [threads] [iterations]
+	    odin run tools/tls-stress -- [conn|pool] [threads] [iterations]
+
+	`conn` (the default) dials a fresh connection per iteration. `pool` borrows
+	from a shared pool, mirroring the e2e stress test that stalls on macOS.
 
 	Honors the same PG* variables as the test harness, including PGSSLMODE.
 */
@@ -42,6 +45,7 @@ Worker :: struct {
 	id:         int,
 	iterations: int,
 	config:     opg.Conn_Config,
+	pool:       ^opg.Pool,
 	stage:      i32, // Stage, read across threads
 	completed:  i32,
 	failure:    string,
@@ -73,6 +77,46 @@ worker_proc :: proc(t: ^thread.Thread) {
 
 		intrinsics.atomic_store(&w.stage, i32(Stage.Disconnecting))
 		opg.disconnect(conn)
+		intrinsics.atomic_add(&w.completed, 1)
+	}
+
+	intrinsics.atomic_store(&w.stage, i32(Stage.Done))
+}
+
+/*
+	pool_worker_proc mirrors tests.test_e2e_high_concurrency_pool_stress: many
+	more threads than connections, each borrowing, querying and returning. The
+	connect-per-iteration path did not reproduce the macOS stall, and pooling is
+	the largest remaining structural difference — connections are reused across
+	many queries instead of being used once, and release can reset or destroy
+	them.
+*/
+pool_worker_proc :: proc(t: ^thread.Thread) {
+	w := (^Worker)(t.data)
+
+	for i in 0 ..< w.iterations {
+		intrinsics.atomic_store(&w.stage, i32(Stage.Connecting))
+		conn, aerr := opg.pool_acquire(w.pool, 10 * time.Second)
+		if aerr != nil {
+			w.failure = fmt.aprintf("acquire: %s", describe_error(aerr))
+			intrinsics.atomic_store(&w.stage, i32(Stage.Failed))
+			return
+		}
+
+		intrinsics.atomic_store(&w.stage, i32(Stage.Querying))
+		Row :: struct {
+			val: i32,
+		}
+		row, qerr := opg.query_struct(conn, Row, "SELECT $1::int AS val;", i32(i))
+
+		intrinsics.atomic_store(&w.stage, i32(Stage.Disconnecting))
+		rerr := opg.pool_release(w.pool, conn)
+
+		if qerr != nil || rerr != nil || row.val != i32(i) {
+			w.failure = fmt.aprintf("query=%v release=%v val=%d", qerr, rerr, row.val)
+			intrinsics.atomic_store(&w.stage, i32(Stage.Failed))
+			return
+		}
 		intrinsics.atomic_add(&w.completed, 1)
 	}
 
@@ -127,9 +171,19 @@ describe_error :: proc(err: opg.Error) -> string {
 }
 
 main :: proc() {
+	use_pool := false
 	threads_n := 32
 	iterations := 20
+
 	args := os.args[1:]
+	if len(args) > 0 && (args[0] == "pool" || args[0] == "conn") {
+		use_pool = args[0] == "pool"
+		args = args[1:]
+		// The pool path is about contention, so default to far more threads
+		// than connections, as the stress test does.
+		if use_pool do threads_n = 100
+		if use_pool do iterations = 5
+	}
 	if len(args) > 0 do threads_n, _ = strconv.parse_int(args[0])
 	if len(args) > 1 do iterations, _ = strconv.parse_int(args[1])
 
@@ -152,16 +206,35 @@ main :: proc() {
 		config.ssl_mode = .Prefer
 	}
 
+	mode := use_pool ? "pool" : "conn"
 	fmt.printfln(
-		"tls-stress: %d threads x %d iterations against %s:%d (sslmode=%v, backend=%s)",
-		threads_n, iterations, config.host, config.port, config.ssl_mode, opg.tls_backend_name(),
+		"tls-stress[%s]: %d threads x %d iterations against %s:%d (sslmode=%v, backend=%s)",
+		mode, threads_n, iterations, config.host, config.port, config.ssl_mode, opg.tls_backend_name(),
 	)
+
+	pool: ^opg.Pool
+	if use_pool {
+		perr: opg.Error
+		pool, perr = opg.pool_create({
+			conn_config     = config,
+			min_conns       = 2,
+			max_conns       = 8,
+			acquire_timeout = 10 * time.Second,
+		}, context.allocator)
+		if perr != nil {
+			fmt.printfln("pool_create failed: %s", describe_error(perr))
+			os.exit(1)
+		}
+		// Destroyed at the end of main, not here: a defer inside this block
+		// would run as soon as the block ends, freeing the pool out from under
+		// every worker.
+	}
 
 	workers := make([]Worker, threads_n)
 	threads := make([]^thread.Thread, threads_n)
 	for i in 0 ..< threads_n {
-		workers[i] = Worker{id = i, iterations = iterations, config = config}
-		threads[i] = thread.create(worker_proc)
+		workers[i] = Worker{id = i, iterations = iterations, config = config, pool = pool}
+		threads[i] = thread.create(use_pool ? pool_worker_proc : worker_proc)
 		threads[i].data = rawptr(&workers[i])
 		thread.start(threads[i])
 	}
@@ -219,6 +292,8 @@ main :: proc() {
 	for msg, count in tally {
 		fmt.printfln("  %d workers failed: %s", count, msg)
 	}
+	if pool != nil do opg.pool_destroy(pool)
+
 	fmt.printfln("tls-stress: finished in %.1fs with %d failed workers", time.duration_seconds(time.since(start)), failures)
 	if failures > 0 do os.exit(1)
 }

@@ -156,6 +156,21 @@ when OPG_INTEGRATION {
 		if v := os.get_env("PGDATABASE", context.temp_allocator); v != "" {
 			cfg.database = v
 		}
+		// PGSSLMODE mirrors libpq and exists so a whole run can be forced onto
+		// one negotiation path. That makes "is this a TLS problem?" a single
+		// command rather than a guess — useful when a platform backend
+		// misbehaves only under load. Tests that pin a mode assign ssl_mode
+		// after this call and are unaffected.
+		if v := os.get_env("PGSSLMODE", context.temp_allocator); v != "" {
+			switch v {
+			case "disable":
+				cfg.ssl_mode = .Disable
+			case "prefer":
+				cfg.ssl_mode = .Prefer
+			case "require":
+				cfg.ssl_mode = .Require
+			}
+		}
 		return cfg
 	}
 

@@ -13,8 +13,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Ensure docker compose postgres is up (idempotent, waits for healthcheck).
-docker compose up -d --wait postgres
+# Ensure docker compose postgres is up only if targeting local docker (PGHOST unset)
+if [ -z "${PGHOST:-}" ]; then
+  docker compose up -d --wait postgres
+fi
 
 # Parse arguments.
 RUN_ASAN=false

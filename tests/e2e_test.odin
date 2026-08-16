@@ -39,13 +39,27 @@ when OPG_INTEGRATION {
 	}
 
 	get_test_conn_config :: proc() -> opg.Conn_Config {
-		return opg.Conn_Config{
-			host     = "127.0.0.1",
+		host := "127.0.0.1"
+		if env_host := os.get_env("PGHOST", context.temp_allocator); env_host != "" {
+			host = env_host
+		}
+		cfg := opg.Conn_Config{
+			host     = host,
 			port     = get_integration_port(),
 			user     = "opg",
 			password = "opg",
 			database = "opg_test",
 		}
+		if v := os.get_env("PGUSER", context.temp_allocator); v != "" {
+			cfg.user = v
+		}
+		if v := os.get_env("PGPASSWORD", context.temp_allocator); v != "" {
+			cfg.password = v
+		}
+		if v := os.get_env("PGDATABASE", context.temp_allocator); v != "" {
+			cfg.database = v
+		}
+		return cfg
 	}
 
 	// ------------------------------------------------------------------------

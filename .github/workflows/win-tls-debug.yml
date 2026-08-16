@@ -1,0 +1,139 @@
+name: Windows TLS Diagnostic
+
+# Manual-only. Every connect on the Windows runner fails with
+# Socket_Closed/Connection_Closed while Linux and macOS pass against the same
+# SSL-enabled server, and there is no Windows machine available to debug on.
+# This job is the instrument: it gathers, in one run, the facts that separate
+# the candidate causes, instead of burning a full CI cycle per hypothesis.
+#
+# Every diagnostic step continues on error so a single run reports everything
+# rather than stopping at the first failure.
+on:
+  workflow_dispatch:
+
+jobs:
+  win-tls:
+    runs-on: windows-latest
+    name: windows schannel diagnostic
+    timeout-minutes: 20
+
+    env:
+      OPG_PGHOST: '127.0.0.1'
+      OPG_PGPORT: '5432'
+      OPG_PGUSER: 'opg'
+      OPG_PGPASSWORD: 'opg'
+      OPG_PGDATABASE: 'opg_test'
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Odin
+        uses: laytan/setup-odin@v2
+        with:
+          release: nightly
+
+      - name: Setup Native PostgreSQL
+        uses: ikalnytskyi/action-setup-postgres@v8
+        id: postgres
+        with:
+          postgres-version: '17'
+          username: opg
+          password: opg
+          database: opg_test
+          port: 5432
+          ssl: true
+
+      - name: Configure Test Auth Scenarios
+        shell: bash
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
+        run: bash scripts/ci-setup-postgres.sh
+
+      # ------------------------------------------------------------------
+      # Server-side facts. If the server is misconfigured, no amount of
+      # Schannel work helps, so establish what it offers before touching it.
+      # ------------------------------------------------------------------
+      - name: Server TLS configuration
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 3
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
+        run: |
+          echo "=== version / ssl settings ==="
+          psql -X -c "SELECT version();"
+          psql -X -c "SHOW ssl;"
+          psql -X -c "SHOW ssl_min_protocol_version;"
+          psql -X -c "SHOW ssl_max_protocol_version;"
+          psql -X -c "SHOW ssl_ciphers;"
+          psql -X -c "SELECT name, setting FROM pg_settings WHERE name LIKE 'ssl%';"
+          echo "=== this session's TLS (psql, libpq/OpenSSL) ==="
+          psql -X -c "SELECT ssl, version, cipher FROM pg_stat_ssl WHERE pid = pg_backend_pid();"
+          echo "=== pg_hba.conf ==="
+          HBA=$(psql -X -t -A -c "SHOW hba_file;" | tr -d '\r')
+          grep -vE '^\s*#|^\s*$' "$HBA" || true
+
+      # Control experiment: a non-Schannel TLS client on the same runner,
+      # against the same server. If this succeeds, the server is fine and the
+      # fault is ours; if it fails, the server is the problem.
+      - name: Control - OpenSSL s_client from the Windows runner
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 3
+        run: |
+          openssl version
+          echo "=== s_client -starttls postgres ==="
+          echo | openssl s_client -connect 127.0.0.1:5432 -starttls postgres -brief 2>&1 | head -40
+          echo "=== forced TLS 1.2 (what SCHANNEL_CRED can negotiate) ==="
+          echo | openssl s_client -connect 127.0.0.1:5432 -starttls postgres -tls1_2 -brief 2>&1 | head -40
+
+      # ------------------------------------------------------------------
+      # The instrument: symbol binding, backend choice, SSLRequest answer,
+      # and a hex dump of what the server sends back after our ClientHello.
+      # ------------------------------------------------------------------
+      - name: Schannel handshake probe
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 5
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+        run: odin run tools/win-tls-probe
+
+      # ------------------------------------------------------------------
+      # Discriminator: does the driver work at all on Windows without TLS?
+      # Green here means the fault is confined to the TLS path.
+      # ------------------------------------------------------------------
+      - name: pgconn integration with PGSSLMODE=disable
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 5
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
+          PGSSLMODE: disable
+        run: odin test pgconn -define:OPG_INTEGRATION=true
+
+      - name: pgconn integration with PGSSLMODE=require
+        continue-on-error: true
+        shell: bash
+        timeout-minutes: 5
+        env:
+          PGHOST: ${{ env.OPG_PGHOST }}
+          PGPORT: ${{ env.OPG_PGPORT }}
+          PGUSER: ${{ env.OPG_PGUSER }}
+          PGPASSWORD: ${{ env.OPG_PGPASSWORD }}
+          PGDATABASE: ${{ env.OPG_PGDATABASE }}
+          PGSSLMODE: require
+        run: odin test pgconn -define:OPG_INTEGRATION=true

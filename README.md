@@ -252,7 +252,7 @@ opg.exec(conn, `
 
 ---
 
-### 4. ORM Struct Serialization & Deserialization
+### 4. Struct Reflection & Data Mapping
 
 `opg.query_struct` and `opg.query_slice` use compile-time type reflection to map SQL column names to Odin struct fields:
 
@@ -386,6 +386,130 @@ fmt.println("Active TLS Backend:", backend_name)
 If no TLS library is present on the host system:
 - `ssl_mode = .Prefer` gracefully proceeds with unencrypted TCP.
 - `ssl_mode = .Require` returns `Net_Error{.TLS_Handshake_Failed}`.
+
+---
+
+### 8. Advanced Row Streaming Examples
+
+When using `opg.query_stream` for high-throughput streaming, you can decode multi-column rows in two ways:
+
+#### Option A: Automatic Struct Mapping via `pgmap.map_row_to_struct`
+Combine `on_desc` (which receives column names and metadata) with `on_row` to automatically map each row into an Odin struct using reflection:
+
+```odin
+package main
+
+import "core:fmt"
+import "core:time"
+import "opg"
+import "opg:pgmap"
+import "opg:pgproto"
+
+User :: struct {
+	id:         i64,
+	name:       string,
+	email:      Maybe(string),
+	score:      f64 `db:"points"`,
+	is_active:  bool,
+	created_at: time.Time,
+}
+
+Stream_Context :: struct {
+	desc:       pgproto.Msg_Row_Description,
+	users_seen: int,
+}
+
+// 1. Capture column metadata (column names, OIDs, formats)
+on_desc :: proc(user_data: rawptr, desc: pgproto.Msg_Row_Description) {
+	ctx := (^Stream_Context)(user_data)
+	ctx.desc = desc
+}
+
+// 2. Map each incoming row directly into the struct
+on_row :: proc(user_data: rawptr, row: pgproto.Msg_Data_Row) -> (proceed: bool) {
+	ctx := (^Stream_Context)(user_data)
+
+	// Automatically maps fields by name and `db:"..."` struct tags
+	user, err := pgmap.map_row_to_struct(User, ctx.desc, row, context.temp_allocator)
+	if err != nil {
+		fmt.eprintln("Mapping error:", err)
+		return false // Abort streaming on error
+	}
+
+	ctx.users_seen += 1
+	fmt.printf(
+		"[%d] User #%v: name=%q, email=%v, score=%.2f, active=%v\n",
+		ctx.users_seen,
+		user.id,
+		user.name,
+		user.email,
+		user.score,
+		user.is_active,
+	)
+
+	return true // Continue streaming next row
+}
+
+main :: proc() {
+	conn, _ := opg.connect(...)
+	defer opg.disconnect(conn)
+
+	ctx: Stream_Context
+	err := opg.query_stream(
+		conn      = conn,
+		sql       = "SELECT id, name, email, points, is_active, created_at FROM users;",
+		on_row    = on_row,
+		on_desc   = on_desc,
+		user_data = &ctx,
+	)
+	if err != nil {
+		fmt.eprintln("Query error:", err)
+	}
+}
+```
+
+#### Option B: Direct Zero-Copy Column Decoding
+For maximum execution speed without reflection overhead, read positional columns directly from `row.values`:
+
+```odin
+package main
+
+import "core:fmt"
+import "core:strconv"
+import "opg"
+import "opg:pgproto"
+
+on_row_manual :: proc(user_data: rawptr, row: pgproto.Msg_Data_Row) -> bool {
+	if len(row.values) < 4 do return false
+
+	// Column 0: id (INT8 / text) -> i64
+	id: i64
+	if !row.values[0].is_null {
+		id, _ = strconv.parse_i64(string(row.values[0].data))
+	}
+
+	// Column 1: name (TEXT / text) -> string (zero-copy view)
+	name: string
+	if !row.values[1].is_null {
+		name = string(row.values[1].data)
+	}
+
+	// Column 2: email (Nullable TEXT) -> Maybe(string)
+	email: Maybe(string) = nil
+	if !row.values[2].is_null {
+		email = string(row.values[2].data)
+	}
+
+	// Column 3: score (FLOAT8 / text) -> f64
+	score: f64
+	if !row.values[3].is_null {
+		score, _ = strconv.parse_f64(string(row.values[3].data))
+	}
+
+	fmt.printf("Manual row: id=%v, name=%q, email=%v, score=%v\n", id, name, email, score)
+	return true
+}
+```
 
 ---
 

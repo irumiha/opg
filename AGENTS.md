@@ -16,7 +16,7 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
 
 1. **Native Wire Protocol & Dynamic TLS Loading via `core:dynlib` (No `libpq`)**:
    - Strictly **no** `libpq`. The PostgreSQL Frontend/Backend Protocol 3.0 is implemented natively from scratch over TCP.
-   - Wire protocol serialization (`pgproto`), connection pooling (`pgconn`), and data mapping (`pgorm`) are written natively in Odin.
+   - Wire protocol serialization (`pgproto`), connection pooling (`pgconn`), and data mapping (`pgmap`) are written natively in Odin.
    - **TLS Strategy (Dynamic Runtime Probing via `core:dynlib`)**:
      - The driver does not statically link external TLS libraries.
      - When a TLS connection is requested, the driver dynamically probes for platform-native or installed cryptographic libraries at runtime:
@@ -28,7 +28,7 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
 2. **3-Layer Separation of Concerns**:
    - `pgproto/`: Pure data-transformation layer. Encodes and decodes PostgreSQL wire messages (`[]byte` $\leftrightarrow$ Odin structs). Agnostic to sockets, files, or network I/O.
    - `pgconn/`: Transport & Connection management layer. Utilizes `core:net` and `core:nbio` to manage TCP connections, state machines, TLS negotiation, and thread-safe connection pooling.
-   - `pgorm/`: High-level data mapping layer. Utilizes `core:reflect` to seamlessly map PostgreSQL `DataRow` messages into user-defined Odin structs and basic types.
+   - `pgmap/`: High-level data mapping layer. Utilizes `core:reflect` to seamlessly map PostgreSQL `DataRow` messages into user-defined Odin structs and basic types.
 
 3. **Mandatory Big-Endian Byte Swapping**:
    - The PostgreSQL wire protocol operates strictly in **Network Byte Order (Big-Endian)**.
@@ -36,7 +36,7 @@ Welcome to **opg** — a high-performance, pure-Odin PostgreSQL database driver 
    - **ALWAYS** use `core:encoding/endian` (e.g., `endian.get_i16(buf, .Big)`, `endian.get_i32(buf, .Big)`, `endian.put_i32(buf, .Big, val)`) for all packet lengths, OIDs, counts, and numeric payloads.
 
 4. **Strict Allocator Boundaries**:
-   - `pgproto` and `pgorm`: Transient parsing must strictly use `allocator := context.temp_allocator`. Never leak memory onto the heap during row parsing.
+   - `pgproto` and `pgmap`: Transient parsing must strictly use `allocator := context.temp_allocator`. Never leak memory onto the heap during row parsing.
    - `pgconn`: Persistent states (socket handles, connection pools, prepared statement caches, type metadata caches) must use a persistent allocator (`context.allocator` or a dedicated custom arena).
 
 5. **Tagged Union Error Handling**:
@@ -75,7 +75,7 @@ All code written in this repository must conform to standard Odin practices and 
 - **Types / Structs / Enums / Unions**: `Pascal_Case` (e.g., `Backend_Message_Type`, `Field_Description`, `Pool_Config`, `Net_Error`).
 - **Procedures & Variables**: `snake_case` (e.g., `parse_message`, `pool_acquire`, `map_row_to_struct`, `bytes_consumed`).
 - **Constants**: `ALL_CAPS` or `Pascal_Case` (e.g., `DEFAULT_PORT :: 5432`, `MAX_PACKET_SIZE :: 1024 * 1024`).
-- **Package Names**: Short, lower-case single words (e.g., `opg`, `pgproto`, `pgconn`, `pgorm`).
+- **Package Names**: Short, lower-case single words (e.g., `opg`, `pgproto`, `pgconn`, `pgmap`).
 
 ### Idiomatic Practices
 - **Error Propagation**: Use Odin's `or_return` idiom with tagged union returns.
@@ -106,7 +106,7 @@ All code written in this repository must conform to standard Odin practices and 
    - Use golden binary files in `pgproto/tests_golden_files/` (e.g., `ready_for_query_idle.bin`, `auth_ok.bin`, `row_description.bin`) to verify bit-accurate parsing and serialization.
 2. **`pgconn` (Connection & Pool Tests)**:
    - Mocked socket / loopback tests and integration tests against a live PostgreSQL instance (configured via `PGHOST`, `PGPORT`, `PGUSER`, `PGPASSWORD`, `PGDATABASE`).
-3. **`pgorm` (Reflection Tests)**:
+3. **`pgmap` (Reflection Tests)**:
    - Reflection unit tests verifying mapping from synthetic `DataRow` messages into various Odin structs (nested structs, arrays, primitive types, nullable fields).
 
 ---
@@ -122,7 +122,7 @@ odin check . -no-entry-point
 odin check pgerr -no-entry-point
 odin check pgproto -no-entry-point
 odin check pgconn -no-entry-point
-odin check pgorm -no-entry-point
+odin check pgmap -no-entry-point
 ```
 
 ### Running Tests

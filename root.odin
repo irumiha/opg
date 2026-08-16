@@ -11,7 +11,7 @@ package opg
 	Architecture (3-Layer Separation of Concerns):
 	  1. pgproto: Pure wire-protocol data transformation (Odin structs <-> []byte).
 	  2. pgconn:  TCP transport, connection state machine, connection pool, and dynamic TLS.
-	  3. pgorm:   High-level data mapping and reflection for Odin structs and query parameters.
+	  3. pgmap:   High-level data mapping and reflection for Odin structs and query parameters.
 	  4. opg:     Ergonomic root facade providing unified access to all driver features.
 
 	Key Features:
@@ -30,7 +30,7 @@ import "base:intrinsics"
 import "core:time"
 import "pgconn"
 import "pgerr"
-import "pgorm"
+import "pgmap"
 
 // ============================================================================
 // 1. Re-exported Errors & Tagged Unions
@@ -134,27 +134,27 @@ tls_backend_type       :: pgconn.tls_backend_type
 tls_backend_name       :: pgconn.tls_backend_name
 
 // ============================================================================
-// 3. Re-exported ORM & PostgreSQL Type OIDs
+// 3. Re-exported Mapping & PostgreSQL Type OIDs
 // ============================================================================
 
-Oid                    :: pgorm.Oid
-OID_BOOL               :: pgorm.OID_BOOL
-OID_BYTEA              :: pgorm.OID_BYTEA
-OID_INT8               :: pgorm.OID_INT8
-OID_INT2               :: pgorm.OID_INT2
-OID_INT4               :: pgorm.OID_INT4
-OID_TEXT               :: pgorm.OID_TEXT
-OID_JSON               :: pgorm.OID_JSON
-OID_FLOAT4             :: pgorm.OID_FLOAT4
-OID_FLOAT8             :: pgorm.OID_FLOAT8
-OID_VARCHAR            :: pgorm.OID_VARCHAR
-OID_DATE               :: pgorm.OID_DATE
-OID_TIME               :: pgorm.OID_TIME
-OID_TIMESTAMP          :: pgorm.OID_TIMESTAMP
-OID_TIMESTAMPTZ        :: pgorm.OID_TIMESTAMPTZ
-OID_NUMERIC            :: pgorm.OID_NUMERIC
-OID_UUID               :: pgorm.OID_UUID
-OID_JSONB              :: pgorm.OID_JSONB
+Oid                    :: pgmap.Oid
+OID_BOOL               :: pgmap.OID_BOOL
+OID_BYTEA              :: pgmap.OID_BYTEA
+OID_INT8               :: pgmap.OID_INT8
+OID_INT2               :: pgmap.OID_INT2
+OID_INT4               :: pgmap.OID_INT4
+OID_TEXT               :: pgmap.OID_TEXT
+OID_JSON               :: pgmap.OID_JSON
+OID_FLOAT4             :: pgmap.OID_FLOAT4
+OID_FLOAT8             :: pgmap.OID_FLOAT8
+OID_VARCHAR            :: pgmap.OID_VARCHAR
+OID_DATE               :: pgmap.OID_DATE
+OID_TIME               :: pgmap.OID_TIME
+OID_TIMESTAMP          :: pgmap.OID_TIMESTAMP
+OID_TIMESTAMPTZ        :: pgmap.OID_TIMESTAMPTZ
+OID_NUMERIC            :: pgmap.OID_NUMERIC
+OID_UUID               :: pgmap.OID_UUID
+OID_JSONB              :: pgmap.OID_JSONB
 
 // ============================================================================
 // 4. Connection Lifecycle Management
@@ -317,7 +317,7 @@ query_struct :: proc(
 	result: T,
 	err: Error,
 ) where intrinsics.type_is_struct(T) {
-	return pgorm.query_struct(conn, T, sql, ..args, allocator = allocator)
+	return pgmap.query_struct(conn, T, sql, ..args, allocator = allocator)
 }
 
 /*
@@ -348,7 +348,7 @@ query_slice :: proc(
 	result: []T,
 	err: Error,
 ) where intrinsics.type_is_struct(T) {
-	return pgorm.query_slice(conn, T, sql, ..args, allocator = allocator)
+	return pgmap.query_slice(conn, T, sql, ..args, allocator = allocator)
 }
 
 /*
@@ -375,7 +375,7 @@ exec :: proc(
 	rows_affected: int,
 	err: Error,
 ) {
-	return pgorm.exec(conn, sql, ..args)
+	return pgmap.exec(conn, sql, ..args)
 }
 
 /*

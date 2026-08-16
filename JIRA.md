@@ -22,11 +22,11 @@ Layer 2: pgconn (Connection State Machine, Auth, Transport & Pool)
   ├── OPG-206: Thread-Safe Connection Pool (Pool & Conn)
   └── OPG-207: pgconn Integration Tests & Concurrency Verification (TSan / ASan)
 
-Layer 3: pgorm (Reflection Mapper & Type System)
+Layer 3: pgmap (Reflection Mapper & Type System)
   ├── OPG-301: PostgreSQL Data Types <-> Odin Type Binary/Text Codecs
   ├── OPG-302: Reflection Struct & Slice Mapper (core:reflect)
   ├── OPG-303: Parameter Binding & SQL Execution Helpers
-  └── OPG-304: pgorm Reflection Unit Tests & Leak Verification
+  └── OPG-304: pgmap Reflection Unit Tests & Leak Verification
 
 Layer 4: opg (Public Facade & End-to-End Integration)
   ├── OPG-401: Public Root Driver API & Ergonomic Facade
@@ -314,21 +314,21 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 
 ---
 
-# Epic 3: `pgorm` Data Mapping & Reflection Layer
+# Epic 3: `pgmap` Data Mapping & Reflection Layer
 
 > **Goal**: High-level reflection mapper translating Postgres `DataRow` messages directly into user-defined Odin structs and native types with zero heap leaks.
-> **Package**: `pgorm`
+> **Package**: `pgmap`
 > **Memory Strategy**: `context.temp_allocator` strictly for all parsed strings, slices, and mapped structs.
 
 ---
 
 ### [OPG-301] PostgreSQL Data Types $\leftrightarrow$ Odin Type Binary/Text Codecs
 - [x] **Status**: Done
-- **Layer**: `pgorm`
+- **Layer**: `pgmap`
 - **Files**:
-  - `pgorm/types.odin`
-  - `pgorm/codecs.odin`
-  - `pgorm/codecs_test.odin`
+  - `pgmap/types.odin`
+  - `pgmap/codecs.odin`
+  - `pgmap/codecs_test.odin`
 - **Description**:
   Implement decoders and encoders for standard PostgreSQL OIDs in both text and binary formats.
 - **Supported Types**:
@@ -349,10 +349,10 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 
 ### [OPG-302] Reflection Struct & Slice Mapper (`core:reflect`)
 - [x] **Status**: Done
-- **Layer**: `pgorm`
+- **Layer**: `pgmap`
 - **Files**:
-  - `pgorm/mapper.odin`
-  - `pgorm/mapper_test.odin`
+  - `pgmap/mapper.odin`
+  - `pgmap/mapper_test.odin`
 - **Prerequisites**: `OPG-301`
 - **Description**:
   Implement generic reflection-based row-to-struct and rows-to-slice decoders.
@@ -373,10 +373,10 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 
 ### [OPG-303] Parameter Binding & SQL Execution Helpers
 - [x] **Status**: Done
-- **Layer**: `pgorm`
+- **Layer**: `pgmap`
 - **Files**:
-  - `pgorm/exec.odin`
-  - `pgorm/exec_test.odin`
+  - `pgmap/exec.odin`
+  - `pgmap/exec_test.odin`
 - **Prerequisites**: `OPG-301`, `OPG-302`, `OPG-204`
 - **Description**:
   Provide ergonomic query and execution helper procedures.
@@ -390,11 +390,11 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
 
 ---
 
-### [OPG-304] `pgorm` Reflection Unit Tests & Leak Verification
+### [OPG-304] `pgmap` Reflection Unit Tests & Leak Verification
 - [x] **Status**: Done
-- **Layer**: `pgorm`
+- **Layer**: `pgmap`
 - **Files**:
-  - `pgorm/mapper_test.odin`
+  - `pgmap/mapper_test.odin`
 - **Prerequisites**: `OPG-301` through `OPG-303`
 - **Description**:
   Comprehensive unit tests verifying reflection mapping over all edge cases.
@@ -420,7 +420,7 @@ Epic 5: multi-platform (CI Matrix & Native TLS Backends)
   - `transaction.odin`
 - **Prerequisites**: Epics 1, 2, 3
 - **Description**:
-  Unify `pgproto`, `pgconn`, and `pgorm` under the clean public facade `package opg`.
+  Unify `pgproto`, `pgconn`, and `pgmap` under the clean public facade `package opg`.
 - **Features**:
   - `connect(config: Config) -> (^Conn, Error)`
   - `pool_create(config: Pool_Config) -> (^Pool, Error)`

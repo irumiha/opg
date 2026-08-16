@@ -1,4 +1,4 @@
-package pgorm
+package pgmap
 
 import "core:encoding/endian"
 import "core:fmt"

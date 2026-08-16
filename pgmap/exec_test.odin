@@ -1,4 +1,4 @@
-package pgorm
+package pgmap
 
 import "core:mem"
 @(require) import "core:os"

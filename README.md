@@ -33,7 +33,7 @@ It has **zero link-time C dependencies** (strictly no `libpq`) and dynamically l
          +--------------------------+--------------------------+
          |                                                     |
 +--------v----------------------+             +----------------v--------+
-|            pgorm              |             |            pgconn       |
+|            pgmap              |             |            pgconn       |
 |  Reflection, struct mapping,  |             |  TCP/TLS Transport,     |
 |  parameter encoding/decoding  |             |  Connection Pools, Auth |
 +--------+----------------------+             +----------------+--------+
@@ -64,7 +64,7 @@ import "opg"
 
 Subpackages can also be used directly if finer-grained control is desired:
 - `opg:pgconn` — Connection management, transport streams, and pooling.
-- `opg:pgorm` — Reflection and data mapping utilities.
+- `opg:pgmap` — Reflection and data mapping utilities.
 - `opg:pgproto` — Wire protocol packet codec.
 - `opg:pgerr` — Tagged union error definitions.
 

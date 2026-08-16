@@ -1,4 +1,4 @@
-package pgorm
+package pgmap
 
 import "base:intrinsics"
 import "core:mem"
@@ -9,7 +9,7 @@ import "../pgerr"
 import "../pgproto"
 
 // ============================================================================
-// High-Level Reflection-Based ORM Mapper
+// High-Level Reflection-Based Row Mapper
 // ============================================================================
 
 /*

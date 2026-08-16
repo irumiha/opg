@@ -1,4 +1,4 @@
-package pgorm
+package pgmap
 
 import "base:intrinsics"
 import "core:fmt"

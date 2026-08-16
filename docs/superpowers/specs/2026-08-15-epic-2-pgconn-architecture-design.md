@@ -9,7 +9,7 @@
 
 ## 1. Overview & Objectives
 
-Epic 2 implements the transport, connection lifecycle, authentication, protocol execution, and connection pooling layer (`pgconn`). It bridges the wire codec layer (`pgproto`) with the reflection and high-level mapping layer (`pgorm`).
+Epic 2 implements the transport, connection lifecycle, authentication, protocol execution, and connection pooling layer (`pgconn`). It bridges the wire codec layer (`pgproto`) with the reflection and high-level mapping layer (`pgmap`).
 
 ### Key Goals:
 1. **Network Stream Buffering & Framing (`OPG-201`)**: Defragment TCP streams over `core:net.TCP_Socket` and frame PostgreSQL 3.0 backend packets without data corruption.
@@ -26,7 +26,7 @@ Epic 2 implements the transport, connection lifecycle, authentication, protocol 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    pgorm / Public Facade                    │
+│                    pgmap / Public Facade                    │
 └───────────────▲─────────────────────────────┬───────────────┘
                 │ Row & Result Stream         │ Queries & Commands
 ┌───────────────┴─────────────────────────────▼───────────────┐

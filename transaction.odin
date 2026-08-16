@@ -20,7 +20,7 @@ package opg
 
 import "base:intrinsics"
 import "core:fmt"
-import "pgorm"
+import "pgmap"
 
 // ============================================================================
 // 1. Transaction Options & Modes
@@ -124,7 +124,7 @@ begin_transaction :: proc(
 		}
 	}
 
-	_, exec_err := pgorm.exec(conn, begin_sql)
+	_, exec_err := pgmap.exec(conn, begin_sql)
 	if exec_err != nil do return tx, exec_err
 
 	tx.conn = conn
@@ -143,7 +143,7 @@ tx_commit :: proc(tx: ^Tx) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
 	if tx.committed || tx.rolled_back do return nil
 
-	_, err := pgorm.exec(tx.conn, "COMMIT;")
+	_, err := pgmap.exec(tx.conn, "COMMIT;")
 	if err != nil do return err
 
 	tx.committed = true
@@ -160,7 +160,7 @@ tx_rollback :: proc(tx: ^Tx) -> Error {
 	if tx == nil || tx.conn == nil do return nil
 	if tx.committed || tx.rolled_back do return nil
 
-	_, err := pgorm.exec(tx.conn, "ROLLBACK;")
+	_, err := pgmap.exec(tx.conn, "ROLLBACK;")
 	tx.rolled_back = true
 	return err
 }
@@ -182,7 +182,7 @@ tx_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
 	if tx.committed || tx.rolled_back do return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
 	sql := fmt.tprintf("SAVEPOINT %s;", name)
-	_, err := pgorm.exec(tx.conn, sql)
+	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
 
@@ -198,7 +198,7 @@ tx_rollback_to_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
 	if tx.committed || tx.rolled_back do return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
 	sql := fmt.tprintf("ROLLBACK TO SAVEPOINT %s;", name)
-	_, err := pgorm.exec(tx.conn, sql)
+	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
 
@@ -215,7 +215,7 @@ tx_release_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
 	if tx.committed || tx.rolled_back do return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
 	sql := fmt.tprintf("RELEASE SAVEPOINT %s;", name)
-	_, err := pgorm.exec(tx.conn, sql)
+	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
 
@@ -245,7 +245,7 @@ tx_query_struct :: proc(
 	err: Error,
 ) where intrinsics.type_is_struct(T) {
 	if tx == nil || tx.conn == nil do return result, Net_Error{type = .Socket_Closed}
-	return pgorm.query_struct(tx.conn, T, sql, ..args, allocator = allocator)
+	return pgmap.query_struct(tx.conn, T, sql, ..args, allocator = allocator)
 }
 
 /*
@@ -270,7 +270,7 @@ tx_query_slice :: proc(
 	err: Error,
 ) where intrinsics.type_is_struct(T) {
 	if tx == nil || tx.conn == nil do return nil, Net_Error{type = .Socket_Closed}
-	return pgorm.query_slice(tx.conn, T, sql, ..args, allocator = allocator)
+	return pgmap.query_slice(tx.conn, T, sql, ..args, allocator = allocator)
 }
 
 /*
@@ -291,5 +291,5 @@ tx_exec :: proc(
 	err: Error,
 ) {
 	if tx == nil || tx.conn == nil do return 0, Net_Error{type = .Socket_Closed}
-	return pgorm.exec(tx.conn, sql, ..args)
+	return pgmap.exec(tx.conn, sql, ..args)
 }

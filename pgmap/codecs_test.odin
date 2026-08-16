@@ -1,4 +1,4 @@
-package pgorm
+package pgmap
 
 import "core:fmt"
 import "core:mem"

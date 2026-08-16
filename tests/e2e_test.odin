@@ -11,7 +11,7 @@ package tests
 @(require) import ".."
 @(require) import "../pgconn"
 @(require) import "../pgerr"
-@(require) import "../pgorm"
+@(require) import "../pgmap"
 @(require) import "../pgproto"
 
 OPG_INTEGRATION :: #config(OPG_INTEGRATION, false)

@@ -51,6 +51,9 @@ Conn :: struct {
 	parameters:          map[string]string,
 	prepared_statements: map[string]Prepared_Statement,
 	allocator:           mem.Allocator,
+	// Per-message parsing scratch, reset between messages. See
+	// conn_scratch_allocator.
+	scratch:             mem.Dynamic_Arena,
 	last_active:         time.Time,
 	on_notice:           Notice_Handler,
 	on_notice_data:      rawptr,
@@ -77,6 +80,54 @@ conn_apply_parameter_status :: proc(conn: ^Conn, name, value: string) {
 		key_clone := strings.clone(name, conn.allocator)
 		val_clone := strings.clone(value, conn.allocator)
 		conn.parameters[key_clone] = val_clone
+	}
+}
+
+/*
+	conn_scratch_allocator returns the connection's per-message parsing arena,
+	initializing it on first use.
+
+	Parsing a message needs somewhere to put what it cannot borrow from the
+	stream buffer — a row's column slice, most of all — and the caller's temp
+	arena is the wrong place for it. The driver never frees those allocations,
+	and a caller streaming a large result cannot reset the arena mid-stream
+	because the row bytes point into the stream buffer. Live memory then grows
+	with the row count, which is precisely what streaming exists to avoid.
+
+	A per-connection arena reset between messages bounds it by the largest
+	single message instead. Blocks are recycled on reset rather than returned,
+	so a long stream settles instead of churning.
+
+	This is also why every Postgres_Error is cloned into conn.allocator: an
+	error recorded mid-loop has to outlive the reset that follows it.
+
+	Lazily initialized so a Conn assembled field by field behaves like one
+	returned by conn_connect.
+*/
+@(private)
+conn_scratch_allocator :: proc(conn: ^Conn) -> mem.Allocator {
+	if conn.scratch.block_size == 0 {
+		backing := conn.allocator
+		if backing.procedure == nil {
+			backing = context.allocator
+		}
+		mem.dynamic_arena_init(&conn.scratch, backing, backing)
+	}
+	return mem.dynamic_arena_allocator(&conn.scratch)
+}
+
+/*
+	conn_scratch_reset reclaims the previous message's parsing scratch.
+
+	Call it at the top of a read loop rather than the bottom: everything the
+	current message lent out — row values, field names, the command tag — stays
+	valid until the next message is read, which is the contract the callbacks
+	already document.
+*/
+@(private)
+conn_scratch_reset :: proc(conn: ^Conn) {
+	if conn.scratch.block_size != 0 {
+		mem.dynamic_arena_reset(&conn.scratch)
 	}
 }
 
@@ -366,6 +417,12 @@ conn_close :: proc(conn: ^Conn) {
 		}
 		delete(conn.prepared_statements)
 		conn.prepared_statements = nil
+	}
+
+	// Returns the recycled parsing blocks to the backing allocator.
+	if conn.scratch.block_size != 0 {
+		mem.dynamic_arena_destroy(&conn.scratch)
+		conn.scratch = {}
 	}
 
 	conn.status = .Closed

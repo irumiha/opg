@@ -57,8 +57,13 @@ conn_exec_params :: proc(
 	var_proceed := true
 	var_recorded_err: pgerr.Error = nil
 
+	scratch := conn_scratch_allocator(conn)
+
 	for {
-		msg := stream_read_message(&conn.stream, context.temp_allocator) or_return
+		// Reclaims the previous message before reading the next, so streaming a
+		// large result set costs the largest single message rather than the sum.
+		conn_scratch_reset(conn)
+		msg := stream_read_message(&conn.stream, scratch) or_return
 
 		#partial switch m in msg {
 		case pgproto.Msg_Parse_Complete, pgproto.Msg_Bind_Complete, pgproto.Msg_No_Data:
@@ -158,8 +163,13 @@ conn_prepare :: proc(
 
 	var_recorded_err: pgerr.Error = nil
 
+	scratch := conn_scratch_allocator(conn)
+
 	for {
-		msg := stream_read_message(&conn.stream, context.temp_allocator) or_return
+		// Reclaims the previous message before reading the next, so streaming a
+		// large result set costs the largest single message rather than the sum.
+		conn_scratch_reset(conn)
+		msg := stream_read_message(&conn.stream, scratch) or_return
 
 		#partial switch m in msg {
 		case pgproto.Msg_Close_Complete:
@@ -289,8 +299,13 @@ conn_exec_prepared :: proc(
 	var_proceed := true
 	var_recorded_err: pgerr.Error = nil
 
+	scratch := conn_scratch_allocator(conn)
+
 	for {
-		msg := stream_read_message(&conn.stream, context.temp_allocator) or_return
+		// Reclaims the previous message before reading the next, so streaming a
+		// large result set costs the largest single message rather than the sum.
+		conn_scratch_reset(conn)
+		msg := stream_read_message(&conn.stream, scratch) or_return
 
 		#partial switch m in msg {
 		case pgproto.Msg_Bind_Complete, pgproto.Msg_No_Data:
@@ -378,8 +393,13 @@ conn_close_statement :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 
 	var_recorded_err: pgerr.Error = nil
 
+	scratch := conn_scratch_allocator(conn)
+
 	for {
-		msg := stream_read_message(&conn.stream, context.temp_allocator) or_return
+		// Reclaims the previous message before reading the next, so streaming a
+		// large result set costs the largest single message rather than the sum.
+		conn_scratch_reset(conn)
+		msg := stream_read_message(&conn.stream, scratch) or_return
 
 		#partial switch m in msg {
 		case pgproto.Msg_Close_Complete:
@@ -462,8 +482,13 @@ conn_close_portal :: proc(conn: ^Conn, name: string) -> pgerr.Error {
 
 	var_recorded_err: pgerr.Error = nil
 
+	scratch := conn_scratch_allocator(conn)
+
 	for {
-		msg := stream_read_message(&conn.stream, context.temp_allocator) or_return
+		// Reclaims the previous message before reading the next, so streaming a
+		// large result set costs the largest single message rather than the sum.
+		conn_scratch_reset(conn)
+		msg := stream_read_message(&conn.stream, scratch) or_return
 
 		#partial switch m in msg {
 		case pgproto.Msg_Close_Complete:

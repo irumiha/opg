@@ -24,6 +24,23 @@ package opg
 	  - Automatic struct reflection mapping for single-row (query_struct) and multi-row (query_slice) queries.
 	  - Streaming row consumption via callbacks for multi-gigabyte/hundred-thousand row result sets.
 	  - Full transaction support with configurable isolation levels and nested savepoints.
+
+	Memory (three lifetimes):
+	  1. Connection state — stream buffer, server parameters, prepared-statement
+	     cache, and any Postgres_Error — comes from the allocator given to
+	     connect/pool_create and lives until disconnect. That allocator must
+	     outlive the connection, and for a pool it must also be thread-safe.
+	  2. Result data — query_struct and query_slice rows — comes from the
+	     `allocator` parameter on those procs, defaulting to
+	     context.temp_allocator. A server with a per-request arena gets the
+	     right behaviour by default; anything cached past the request needs an
+	     explicit allocator.
+	  3. Message parsing scratch is the driver's own, recycled between messages,
+	     so streaming a large result costs the largest single message rather
+	     than the sum of all rows.
+
+	The driver never resets context.temp_allocator: an arena you install is
+	yours, and the driver will not pull it out from under you.
 */
 
 import "base:intrinsics"
@@ -277,7 +294,14 @@ is_alive :: proc(conn: ^Conn) -> bool {
 	Parameters:
 	  - config: Pool configuration including connection factory options, min/max limits,
 	            idle timeout, and max lifetime.
-	  - allocator: Allocator for pool state (default context.allocator).
+	  - allocator: Allocator for pool state and for every connection the pool
+	               creates (default context.allocator).
+
+	               IT MUST BE THREAD-SAFE AND MUST OUTLIVE THE POOL. Connections
+	               are dialled outside the pool mutex so a slow connect cannot
+	               block other borrowers, which means two threads may allocate
+	               through it simultaneously. context.allocator is fine; an
+	               arena or a request-scoped allocator is not.
 
 	Example:
 	  pool, err := opg.pool_create({

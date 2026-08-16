@@ -25,7 +25,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     name: offline (${{ matrix.os }})
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Odin
         uses: laytan/setup-odin@v2

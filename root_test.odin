@@ -35,3 +35,25 @@ test_root_facade_nil_connection_safety :: proc(t: ^testing.T) {
 	// Ensure disconnect on nil does not panic
 	disconnect(nil)
 }
+
+@(test)
+test_is_alive_reflects_connection_state :: proc(t: ^testing.T) {
+	testing.expect(t, !is_alive(nil), "a nil connection is not alive")
+
+	ready := Conn{status = .Ready}
+	testing.expect(t, is_alive(&ready), "a ready connection is alive")
+
+	in_tx := Conn{status = .In_Transaction}
+	testing.expect(t, is_alive(&in_tx), "a connection inside a transaction is alive")
+
+	// An aborted transaction still has a working socket; it needs a ROLLBACK,
+	// not a reconnect, so it must not be reported as dead.
+	failed_tx := Conn{status = .Failed_Transaction}
+	testing.expect(t, is_alive(&failed_tx), "an aborted transaction is still connected")
+
+	closed := Conn{status = .Closed}
+	testing.expect(t, !is_alive(&closed), "a closed connection is not alive")
+
+	disconnected := Conn{status = .Disconnected}
+	testing.expect(t, !is_alive(&disconnected), "a disconnected connection is not alive")
+}

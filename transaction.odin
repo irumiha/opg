@@ -20,6 +20,7 @@ package opg
 
 import "base:intrinsics"
 import "core:fmt"
+import "core:strings"
 import "pgmap"
 
 // ============================================================================
@@ -106,6 +107,24 @@ begin_transaction :: proc(
 		return tx, Net_Error{type = .Socket_Closed}
 	}
 
+	// BEGIN inside an open transaction is only a server WARNING, so without
+	// this guard a second begin_transaction would hand back a Tx handle that
+	// shares the first one's transaction: committing either would commit both.
+	// PostgreSQL has no nested transactions; use tx_savepoint for that.
+	switch conn.transaction_status {
+	case .In_Transaction:
+		return tx, Protocol_Error{
+			type    = .Unexpected_Message,
+			message = "connection is already in a transaction; use tx_savepoint for nesting",
+		}
+	case .Failed_Transaction:
+		return tx, Protocol_Error{
+			type    = .Unexpected_Message,
+			message = "connection is in an aborted transaction; roll it back before beginning a new one",
+		}
+	case .Idle:
+	}
+
 	begin_sql: string
 	switch options.isolation {
 	case .Default:
@@ -136,12 +155,27 @@ begin_transaction :: proc(
 	Marks the transaction as committed. Calling tx_commit on an already finished
 	transaction is a safe no-op.
 
+	If the transaction has been aborted by an earlier failed statement, COMMIT is
+	refused rather than sent: PostgreSQL answers COMMIT in an aborted transaction
+	with a CommandComplete tag of "ROLLBACK" and no ErrorResponse, so sending it
+	would discard every statement in the transaction while looking like success.
+	The refusal leaves the transaction open so the customary
+	`defer opg.tx_rollback(&tx)` still clears the aborted state on the connection.
+
 	Returns:
+	  - Protocol_Error{.Unexpected_Message} if the transaction is aborted.
 	  - Error if the COMMIT command fails on the server.
 */
 tx_commit :: proc(tx: ^Tx) -> Error {
 	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
 	if tx.committed || tx.rolled_back do return nil
+
+	if tx.conn.transaction_status == .Failed_Transaction {
+		return Protocol_Error{
+			type    = .Unexpected_Message,
+			message = "transaction is aborted; COMMIT would roll back. Roll back instead",
+		}
+	}
 
 	_, err := pgmap.exec(tx.conn, "COMMIT;")
 	if err != nil do return err
@@ -165,9 +199,42 @@ tx_rollback :: proc(tx: ^Tx) -> Error {
 	return err
 }
 
+/*
+	tx_check_open reports whether tx may still issue statements. A Tx whose
+	commit or rollback has already run no longer brackets anything: statements
+	sent through it would execute in autocommit and persist immediately, so
+	every statement-issuing entry point rejects that state here.
+*/
+@(private)
+tx_check_open :: proc(tx: ^Tx) -> Error {
+	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
+	if tx.committed || tx.rolled_back {
+		return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
+	}
+	return nil
+}
+
 // ============================================================================
 // 3. Savepoint Management
 // ============================================================================
+
+/*
+	quote_identifier renders name as a quoted SQL identifier, doubling any
+	embedded double quote. Savepoint names are part of the statement text
+	(SAVEPOINT takes no bind parameters), so they cannot be passed as $1 and
+	must be quoted here instead. Quoting also makes reserved words and names
+	containing spaces or mixed case usable as savepoint names.
+*/
+quote_identifier :: proc(name: string, allocator := context.temp_allocator) -> string {
+	b := strings.builder_make(allocator)
+	strings.write_byte(&b, '"')
+	for c in name {
+		if c == '"' do strings.write_byte(&b, '"')
+		strings.write_rune(&b, c)
+	}
+	strings.write_byte(&b, '"')
+	return strings.to_string(b)
+}
 
 /*
 	tx_savepoint establishes a new named savepoint within the active transaction.
@@ -179,9 +246,8 @@ tx_rollback :: proc(tx: ^Tx) -> Error {
 	  - name: Identifier name for the savepoint.
 */
 tx_savepoint :: proc(tx: ^Tx, name: string) -> Error {
-	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
-	if tx.committed || tx.rolled_back do return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
-	sql := fmt.tprintf("SAVEPOINT %s;", name)
+	tx_check_open(tx) or_return
+	sql := fmt.tprintf("SAVEPOINT %s;", quote_identifier(name))
 	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
@@ -195,9 +261,8 @@ tx_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	  - name: Identifier name of the savepoint to roll back to.
 */
 tx_rollback_to_savepoint :: proc(tx: ^Tx, name: string) -> Error {
-	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
-	if tx.committed || tx.rolled_back do return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
-	sql := fmt.tprintf("ROLLBACK TO SAVEPOINT %s;", name)
+	tx_check_open(tx) or_return
+	sql := fmt.tprintf("ROLLBACK TO SAVEPOINT %s;", quote_identifier(name))
 	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
@@ -212,9 +277,8 @@ tx_rollback_to_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	  - name: Identifier name of the savepoint to release.
 */
 tx_release_savepoint :: proc(tx: ^Tx, name: string) -> Error {
-	if tx == nil || tx.conn == nil do return Net_Error{type = .Socket_Closed}
-	if tx.committed || tx.rolled_back do return Protocol_Error{type = .Unexpected_Message, message = "Transaction is closed"}
-	sql := fmt.tprintf("RELEASE SAVEPOINT %s;", name)
+	tx_check_open(tx) or_return
+	sql := fmt.tprintf("RELEASE SAVEPOINT %s;", quote_identifier(name))
 	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
@@ -244,7 +308,7 @@ tx_query_struct :: proc(
 	result: T,
 	err: Error,
 ) where intrinsics.type_is_struct(T) {
-	if tx == nil || tx.conn == nil do return result, Net_Error{type = .Socket_Closed}
+	if cerr := tx_check_open(tx); cerr != nil do return result, cerr
 	return pgmap.query_struct(tx.conn, T, sql, ..args, allocator = allocator)
 }
 
@@ -269,7 +333,7 @@ tx_query_slice :: proc(
 	result: []T,
 	err: Error,
 ) where intrinsics.type_is_struct(T) {
-	if tx == nil || tx.conn == nil do return nil, Net_Error{type = .Socket_Closed}
+	if cerr := tx_check_open(tx); cerr != nil do return nil, cerr
 	return pgmap.query_slice(tx.conn, T, sql, ..args, allocator = allocator)
 }
 
@@ -290,6 +354,6 @@ tx_exec :: proc(
 	rows_affected: int,
 	err: Error,
 ) {
-	if tx == nil || tx.conn == nil do return 0, Net_Error{type = .Socket_Closed}
+	if cerr := tx_check_open(tx); cerr != nil do return 0, cerr
 	return pgmap.exec(tx.conn, sql, ..args)
 }

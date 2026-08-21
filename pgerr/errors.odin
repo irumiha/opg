@@ -2,13 +2,11 @@ package pgerr
 
 import "core:net"
 
-// ============================================================================
 // opg Error Domain (leaf package)
-// ============================================================================
+
 // All driver error types live here so that every layer (pgproto, pgconn,
 // pgmap, and the root opg facade) can import them WITHOUT creating an import
 // cycle. Subpackages must import "pgerr" — never the root package.
-// ============================================================================
 
 Net_Error_Type :: enum {
 	None,

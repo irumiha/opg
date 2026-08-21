@@ -23,10 +23,6 @@ import "core:fmt"
 import "core:strings"
 import "pgmap"
 
-// ============================================================================
-// 1. Transaction Options & Modes
-// ============================================================================
-
 /*
 	Isolation_Level controls the transaction isolation level in PostgreSQL:
 	  - Default: Uses server-default isolation level (typically Read Committed).
@@ -72,10 +68,6 @@ Tx :: struct {
 	committed:   bool,
 	rolled_back: bool,
 }
-
-// ============================================================================
-// 2. Transaction Lifecycle
-// ============================================================================
 
 /*
 	begin_transaction begins a new transaction on the given connection with the
@@ -218,10 +210,6 @@ tx_check_open :: proc(tx: ^Tx) -> Error {
 	return nil
 }
 
-// ============================================================================
-// 3. Savepoint Management
-// ============================================================================
-
 /*
 	quote_identifier renders name as a quoted SQL identifier, doubling any
 	embedded double quote. Savepoint names are part of the statement text
@@ -286,10 +274,6 @@ tx_release_savepoint :: proc(tx: ^Tx, name: string) -> Error {
 	_, err := pgmap.exec(tx.conn, sql)
 	return err
 }
-
-// ============================================================================
-// 4. Transactional Query Execution
-// ============================================================================
 
 /*
 	tx_query_struct executes a parameterized query within the transaction and maps

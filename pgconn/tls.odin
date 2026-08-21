@@ -6,9 +6,8 @@ import "core:time"
 import "../pgerr"
 import "../pgproto"
 
-// ============================================================================
 // Multi-Platform Dynamic TLS Layer (Frontend/Backend Protocol 3.0)
-// ============================================================================
+
 // Architecture:
 // 1. Dynamic Runtime Loading: Probes OS-native TLS APIs first, falling back to
 //    OpenSSL via core:dynlib. Strictly no static link-time C library dependencies.
@@ -17,7 +16,6 @@ import "../pgproto"
 //    - macOS (Darwin): SecureTransport (Security.framework) -> OpenSSL
 //    - Linux / POSIX: OpenSSL (libssl.so.3 / libssl.so)
 // 3. Graceful Absence: Degrades to plaintext (Prefer) or Net_Error (Require).
-// ============================================================================
 
 /*
 	SSL_Mode selects TLS behavior for conn_connect. The zero value is

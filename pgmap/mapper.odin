@@ -8,9 +8,7 @@ import "core:time"
 import "../pgerr"
 import "../pgproto"
 
-// ============================================================================
 // High-Level Reflection-Based Row Mapper
-// ============================================================================
 
 /*
 	map_row_to_struct maps a single PostgreSQL DataRow into an Odin struct using reflection.

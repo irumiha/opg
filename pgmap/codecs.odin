@@ -7,13 +7,11 @@ import "core:strconv"
 import "core:strings"
 import "core:time"
 
-// ============================================================================
 // PostgreSQL Data Type Codecs (Text & Binary Formats)
-// ============================================================================
+
 // Big-Endian Wire Protocol Rule: All binary integer and float operations
 // strictly use core:encoding/endian.
 // Allocator Boundary Rule: Allocator parameter defaults to context.temp_allocator.
-// ============================================================================
 
 // ----------------------------------------------------------------------------
 // Text Decoders (Wire Text Format -> Odin Native Types)

@@ -50,10 +50,6 @@ import "pgerr"
 import "pgmap"
 import "pgproto"
 
-// ============================================================================
-// 1. Re-exported Errors & Tagged Unions
-// ============================================================================
-
 /*
 	Error is the overarching tagged union returned by all opg driver operations.
 	Includes:
@@ -100,10 +96,6 @@ Pool_Error_Type        :: pgerr.Pool_Error_Type
 */
 postgres_error_destroy :: pgerr.postgres_error_destroy
 postgres_error_clone   :: pgerr.postgres_error_clone
-
-// ============================================================================
-// 2. Re-exported Connection, TLS & Pool Types
-// ============================================================================
 
 /*
 	Conn represents an established, stateful connection to a PostgreSQL database server.
@@ -205,10 +197,6 @@ tls_backend_type       :: pgconn.tls_backend_type
 */
 tls_backend_name       :: pgconn.tls_backend_name
 
-// ============================================================================
-// 3. Re-exported Mapping & PostgreSQL Type OIDs
-// ============================================================================
-
 Oid                    :: pgmap.Oid
 OID_BOOL               :: pgmap.OID_BOOL
 OID_BYTEA              :: pgmap.OID_BYTEA
@@ -227,10 +215,6 @@ OID_TIMESTAMPTZ        :: pgmap.OID_TIMESTAMPTZ
 OID_NUMERIC            :: pgmap.OID_NUMERIC
 OID_UUID               :: pgmap.OID_UUID
 OID_JSONB              :: pgmap.OID_JSONB
-
-// ============================================================================
-// 4. Connection Lifecycle Management
-// ============================================================================
 
 /*
 	connect establishes a new TCP connection to PostgreSQL, completes TLS negotiation
@@ -281,10 +265,6 @@ disconnect :: proc(conn: ^Conn) {
 is_alive :: proc(conn: ^Conn) -> bool {
 	return pgconn.conn_is_alive(conn)
 }
-
-// ============================================================================
-// 5. Connection Pool API
-// ============================================================================
 
 /*
 	pool_create initializes a new thread-safe connection pool with the specified configuration.
@@ -361,10 +341,6 @@ pool_acquire :: proc(pool: ^Pool, timeout := time.Duration(0)) -> (^Conn, Error)
 pool_release :: proc(pool: ^Pool, conn: ^Conn) -> Error {
 	return pgconn.pool_release(pool, conn)
 }
-
-// ============================================================================
-// 6. High-Level Query & Execution Helpers
-// ============================================================================
 
 /*
 	query_struct executes a parameterized SQL query and maps the first returned row

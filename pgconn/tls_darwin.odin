@@ -8,9 +8,7 @@ import "core:strings"
 import "core:time"
 import "../pgerr"
 
-// ============================================================================
 // macOS SecureTransport TLS Backend (Security.framework)
-// ============================================================================
 
 SSLReadFunc  :: #type proc "c" (connection: rawptr, data: rawptr, dataLength: ^c.size_t) -> c.int
 SSLWriteFunc :: #type proc "c" (connection: rawptr, data: rawptr, dataLength: ^c.size_t) -> c.int

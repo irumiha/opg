@@ -7,9 +7,7 @@ import "core:strings"
 import "core:time"
 import "../pgerr"
 
-// ============================================================================
 // Windows Schannel TLS Backend (SSPI via secur32.dll / sspicli.dll)
-// ============================================================================
 
 SecHandle :: struct {
 	dwLower: uintptr,

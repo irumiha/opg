@@ -11,9 +11,7 @@ import "../pgconn"
 import "../pgerr"
 import "../pgproto"
 
-// ============================================================================
 // High-Level Ergonomic SQL Execution & Parameter Binding API
-// ============================================================================
 
 // Odin rejects returning compound literals containing an untyped nil slice
 // ("unsafe to return ... uses the current stack frame's memory"), so NULL
